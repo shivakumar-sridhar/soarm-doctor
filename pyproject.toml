@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "soarm-doctor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Health check for SO-100 / SO-101 robot arms — finds the bad servo, cable or power supply before you train on it."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,10 +37,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# v0.2 — live 3D view of the arm during the motion sweep.
+# Live 3D view of the arm during the motion sweep. Rerun 0.24+ has a built-in
+# URDF loader; 0.28+ for the explicit named frame ids this uses.
 viz = [
-    "viser>=0.2.0",
-    "yourdfpy>=0.0.53",
+    "rerun-sdk>=0.28",
 ]
 dev = [
     "pytest>=8.0",

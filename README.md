@@ -129,14 +129,49 @@ report = Report(port="/dev/ttyACM0", model="so101", servos=servos)
 print(report.verdict().summary)
 ```
 
-## Roadmap
+## 3D view (optional)
 
-- **v0.2** — optional `--viz`: a browser tab showing the arm in 3D, moving live
-  as you sweep it, with bad joints highlighted. Built on
-  [viser](https://viser.studio) and the Apache-2.0 URDF from
-  [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100).
-  The terminal path stays fully functional — plenty of these arms live on a
-  headless Jetson or Pi.
+```bash
+pip install 'soarm-doctor[viz]'
+soarm-doctor --model so100 --viz
+```
+
+Opens a browser tab with the arm in 3D. As you sweep each joint, the on-screen
+arm moves with it and the joint turns green; a joint you haven't touched stays
+grey, and one with a fault turns red. Alongside it are plots of encoder position
+and corrupt-read count over time.
+
+The point isn't a picture of a red joint — the table already tells you that in
+fewer characters. It's that **the arm moving on screen in sync with the one in
+your hands** verifies the encoder reads, the direction and the range in a single
+glance, and makes a joint you forgot to sweep obvious without reading anything.
+
+| Colour | Meaning |
+|---|---|
+| grey | not swept yet |
+| green | swept, clean |
+| amber | dropped packets |
+| red | corruption or a servo-reported fault |
+
+```bash
+soarm-doctor --viz-spawn              # desktop viewer instead of a browser
+soarm-doctor --viz-save session.rrd   # record it, attach to a bug report
+```
+
+That last one is worth knowing about: `.rrd` recordings capture the whole
+session, so "my arm is doing something weird" can come with the actual data
+attached.
+
+Built on [Rerun](https://rerun.io)'s built-in URDF loader, with the Apache-2.0
+arm models from [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100)
+(downloaded once on first use and cached, ~4 MB for the SO-100, ~16 MB for the
+SO-101 — they're not shipped in the wheel).
+
+**The 3D pose is approximate.** Ticks are mapped to radians about the servo's
+mid-point with no per-arm calibration, so a joint whose zero is offset renders
+rotated. This is a liveness check, not a calibrated digital twin. If the view
+fails to start for any reason, the check carries on without it — the terminal
+path is the product.
 
 ## License
 

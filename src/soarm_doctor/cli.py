@@ -198,6 +198,37 @@ def print_ports() -> int:
     return 0
 
 
+def _start_viz(args: argparse.Namespace, servos: list[ServoResult]):
+    """Bring up the 3D view, or explain why it couldn't and carry on without it.
+
+    A failure here must never take the diagnostic down with it — the terminal
+    path is the product; the 3D is a convenience.
+    """
+    try:
+        from .viz import RerunViz
+    except ImportError:
+        print(f"  {yellow('note')}: 3D view needs the extra — pip install 'soarm-doctor[viz]'. Continuing without it.")
+        return None
+
+    try:
+        viz = RerunViz(
+            model=args.model,
+            spawn=args.viz_spawn,
+            save=args.viz_save,
+            web_port=9090,
+        )
+        viz.start(servos)
+    except Exception as exc:
+        print(f"  {yellow('note')}: could not start the 3D view ({exc}). Continuing without it.")
+        return None
+
+    if viz.url:
+        print(f"  {green('3D view')}: {viz.url}")
+    elif args.viz_save:
+        print(f"  {green('3D view')}: recording to {args.viz_save}")
+    return viz
+
+
 # --- main -------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -213,6 +244,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list-ports", action="store_true", help="list serial ports and exit")
     parser.add_argument("--ids", help="comma-separated servo ids (default 1,2,3,4,5,6)")
     parser.add_argument("--names", help="comma-separated joint names, matched to --ids")
+    viz = parser.add_argument_group("3D view (needs the viz extra)")
+    viz.add_argument("--viz", action="store_true", help="live 3D arm in a browser during the motion sweep")
+    viz.add_argument("--viz-spawn", action="store_true", help="desktop Rerun viewer instead of a browser")
+    viz.add_argument("--viz-save", metavar="PATH", help="record the session to a .rrd file to attach to a bug report")
     parser.add_argument("--version", action="version", version=f"soarm-doctor {__version__}")
     return parser
 
@@ -281,6 +316,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n{dim('[3/3] MOTION — skipped (--quick)')}")
         else:
             print(f"\n{bold('[3/3] MOTION')} — data integrity while the arm moves")
+
+            viz = None
+            if args.viz or args.viz_spawn or args.viz_save:
+                viz = _start_viz(args, servos)
+
             try:
                 input(f"    {dim('>> press ENTER, then sweep every joint and the gripper. Ctrl-C when done...')}")
             except (EOFError, KeyboardInterrupt):
@@ -288,7 +328,13 @@ def main(argv: list[str] | None = None) -> int:
                 return render_verdict(report)
             print()
             table = LiveTable()
-            elapsed = run_motion_check(bus, servos, on_update=lambda s, t: table.draw(motion_table(s, t)))
+
+            def on_update(current: list[ServoResult], elapsed: float) -> None:
+                table.draw(motion_table(current, elapsed))
+                if viz is not None:
+                    viz.update(current, elapsed)
+
+            elapsed = run_motion_check(bus, servos, on_update=on_update)
             table.draw(motion_table(servos, elapsed), final=True)
             report.motion_tested = True
             report.motion_seconds = elapsed
