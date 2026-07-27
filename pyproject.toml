@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "soarm-doctor"
-version = "0.2.0"
+version = "0.2.1"
 description = "Health check for SO-100 / SO-101 robot arms — finds the bad servo, cable or power supply before you train on it."
 readme = "README.md"
 requires-python = ">=3.10"

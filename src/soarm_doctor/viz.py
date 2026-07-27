@@ -116,17 +116,45 @@ STATUS_COLOURS = {
 }
 
 
-def ticks_to_radians(ticks: int, lower: float, upper: float) -> float:
-    """Encoder ticks to a joint angle, clamped to the URDF's limits.
+#: Ticks of travel before the observed range is trusted for scaling. Below this
+#: the range is still growing every frame and mapping through it would make the
+#: on-screen joint jump around; ~400 ticks is about 35 degrees, well past an
+#: accidental nudge.
+SWEEP_FOR_RANGE_MAPPING = 400
 
-    The 12-bit encoder covers a full turn, so one tick is 2*pi/4096 rad measured
-    from mid-scale. No per-arm calibration is applied — see the module docstring
-    on why approximate is the right call here.
+
+def ticks_to_radians(ticks: int, lower: float, upper: float) -> float:
+    """Encoder ticks to a joint angle, before that joint has been swept.
+
+    One tick is 2*pi/4096 rad, measured from servo mid-scale — but mid-scale is
+    mapped to the *middle of the joint's range*, not to zero. Several SO-ARM
+    joints are one-sided (``shoulder_lift`` is 0..3.5 rad), so anchoring at zero
+    would park them at a limit and clamp away half the travel.
     """
     import math
 
-    radians = (ticks - TICK_CENTRE) * (2.0 * math.pi / TICKS_PER_TURN)
+    centre = (lower + upper) / 2.0
+    radians = centre + (ticks - TICK_CENTRE) * (2.0 * math.pi / TICKS_PER_TURN)
     return max(lower, min(upper, radians))
+
+
+def joint_angle(servo: ServoResult, lower: float, upper: float) -> float | None:
+    """Angle to render for this servo, or None if it has no good reading yet.
+
+    Once a joint has been swept a meaningful amount, its observed tick range is
+    mapped onto the joint's URDF range, which self-calibrates away the unknown
+    per-servo zero offset and makes the on-screen joint track the real one
+    closely. Before that, it falls back to the absolute mid-scale mapping.
+
+    Direction is still not knowable without calibration data: a joint mounted
+    reversed renders mirrored. That's acceptable for a liveness check.
+    """
+    if servo.position is None:
+        return None
+    if servo.span >= SWEEP_FOR_RANGE_MAPPING and servo.position_min is not None:
+        fraction = (servo.position - servo.position_min) / servo.span
+        return lower + fraction * (upper - lower)
+    return ticks_to_radians(servo.position, lower, upper)
 
 
 # --- the view ---------------------------------------------------------------
@@ -226,11 +254,12 @@ class RerunViz:
 
         for servo in servos:
             joint = self._joints.get(servo.name)
-            if joint is not None and servo.position_max is not None:
-                angle = ticks_to_radians(servo.position_max, joint.limit_lower, joint.limit_upper)
-                rr.log(f"joints/{servo.name}", joint.compute_transform(angle))
-            if servo.position_max is not None:
-                rr.log(f"joint/{servo.name}", rr.Scalars(float(servo.position_max)))
+            if joint is not None:
+                angle = joint_angle(servo, joint.limit_lower, joint.limit_upper)
+                if angle is not None:
+                    rr.log(f"joints/{servo.name}", joint.compute_transform(angle))
+            if servo.position is not None:
+                rr.log(f"joint/{servo.name}", rr.Scalars(float(servo.position)))
             rr.log(f"fault/{servo.name}", rr.Scalars(float(servo.motion_corrupt)))
             self._paint(servo.name, servo_status(servo))
 

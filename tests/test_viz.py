@@ -16,8 +16,10 @@ from soarm_doctor.report import MIN_MEANINGFUL_SPAN
 from soarm_doctor.viz import (
     ASSET_SHA,
     STATUS_COLOURS,
+    SWEEP_FOR_RANGE_MAPPING,
     TICK_CENTRE,
     cache_dir,
+    joint_angle,
     servo_status,
     ticks_to_radians,
 )
@@ -127,3 +129,54 @@ def test_viz_resolves_every_joint_and_colours_faults(tmp_path):
     assert viz._last_status["shoulder_lift"] == "bad"
     assert viz._last_status["wrist_flex"] == "bad"
     assert viz._last_status["shoulder_pan"] == "untested"
+
+
+# --- live position tracking (regression: the pose used to be driven by the
+# running maximum, so the arm ratcheted one way and stuck) -------------------
+def swept(name: str = "elbow_flex", lo: int = 1000, hi: int = 3000, now: int | None = None):
+    servo = one_servo(name)
+    servo.observe_position(lo)
+    servo.observe_position(hi)
+    servo.observe_position(now if now is not None else hi)
+    return servo
+
+
+def test_position_follows_the_latest_read_not_the_maximum():
+    servo = one_servo()
+    servo.observe_position(3000)
+    servo.observe_position(1000)
+    assert servo.position == 1000
+    assert servo.position_max == 3000
+
+
+def test_angle_moves_back_when_the_joint_moves_back():
+    """The bug: rendering from position_max meant the arm never came back."""
+    at_top = joint_angle(swept(now=3000), -1.0, 1.0)
+    at_bottom = joint_angle(swept(now=1000), -1.0, 1.0)
+    assert at_top > at_bottom
+
+
+def test_swept_joint_maps_its_range_onto_the_joint_limits():
+    lo, hi = -1.0, 1.0
+    assert joint_angle(swept(now=1000), lo, hi) == pytest.approx(lo)
+    assert joint_angle(swept(now=3000), lo, hi) == pytest.approx(hi)
+    assert joint_angle(swept(now=2000), lo, hi) == pytest.approx(0.0)
+
+
+def test_unswept_joint_falls_back_to_absolute_mapping():
+    servo = one_servo()
+    servo.observe_position(TICK_CENTRE)
+    assert servo.span < SWEEP_FOR_RANGE_MAPPING
+    # centre of the joint range, not zero
+    assert joint_angle(servo, 0.0, 3.5) == pytest.approx(1.75)
+
+
+def test_one_sided_joint_is_not_pinned_to_its_limit():
+    """shoulder_lift is 0..3.5 rad; anchoring at zero clamped half the sweep."""
+    below = ticks_to_radians(TICK_CENTRE - 500, 0.0, 3.5)
+    above = ticks_to_radians(TICK_CENTRE + 500, 0.0, 3.5)
+    assert 0.0 < below < above < 3.5
+
+
+def test_no_angle_before_any_good_read():
+    assert joint_angle(one_servo(), -1.0, 1.0) is None

@@ -120,7 +120,7 @@ def motion_table(servos: list[ServoResult], elapsed: float) -> list[str]:
     for servo in servos:
         low = servo.position_min if servo.position_min is not None else 0
         high = servo.position_max if servo.position_max is not None else 0
-        position = f"{high:6d}" if servo.position_max is not None else "   ---"
+        position = f"{servo.position:6d}" if servo.position is not None else "   ---"
 
         if servo.motion_corrupt:
             status = red(f"CORRUPT x{servo.motion_corrupt}")

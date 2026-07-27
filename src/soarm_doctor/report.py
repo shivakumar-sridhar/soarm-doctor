@@ -46,6 +46,7 @@ class ServoResult:
     motion_reads: int = 0
     motion_corrupt: int = 0
     motion_commfail: int = 0
+    position: int | None = None  # most recent good read — drives the live table and 3D pose
     position_min: int | None = None
     position_max: int | None = None
 
@@ -68,6 +69,13 @@ class ServoResult:
         return decode_error(self.error_bits)
 
     def observe_position(self, ticks: int) -> None:
+        """Record a good read: the live value, plus the range swept so far.
+
+        `position` is what the operator is looking at right now; min/max are the
+        evidence that the joint was actually moved. Driving a display from
+        min/max instead would ratchet in one direction and stick.
+        """
+        self.position = ticks
         self.position_min = ticks if self.position_min is None else min(self.position_min, ticks)
         self.position_max = ticks if self.position_max is None else max(self.position_max, ticks)
 
