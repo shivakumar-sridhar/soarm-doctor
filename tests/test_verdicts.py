@@ -178,3 +178,75 @@ def test_corrupting_joint_is_not_also_reported_as_unswept():
     servos[3].position_min = servos[3].position_max = None
     report = report_for(servos, motion_tested=True)
     assert [i.code for i in report.issues()] == ["CORRUPT"]
+
+
+# --- under-voltage (found on real hardware: an unpowered arm passed clean,
+# because servos answer off the board's USB rail and never set the error bit) --
+def test_servos_answering_on_bus_residue_do_not_pass():
+    """Real case: six servos at 5.4V, all stable, previously reported PASS."""
+    servos = healthy_servos()
+    for servo in servos:
+        servo.voltage = 5.4
+    verdict = report_for(servos, motion_tested=True).verdict()
+    assert verdict.code == "UNDER_VOLTAGE"
+    assert verdict.exit_code == EXIT_FAIL
+    assert "5.4V" in verdict.summary
+    assert any("power supply" in r for r in verdict.remedies)
+
+
+def test_normal_12v_arm_is_unaffected():
+    servos = healthy_servos()  # 12.1V
+    assert report_for(servos, motion_tested=True).verdict().code == "PASS"
+
+
+def test_a_74v_variant_still_passes():
+    """7.4V arms are legitimate; the threshold sits below every variant."""
+    servos = healthy_servos()
+    for servo in servos:
+        servo.voltage = 7.2
+    assert report_for(servos, motion_tested=True).verdict().code == "PASS"
+
+
+def test_threshold_is_configurable():
+    servos = healthy_servos()
+    for servo in servos:
+        servo.voltage = 7.2
+    report = report_for(servos, motion_tested=True)
+    report.min_operating_voltage = 9.0  # insist on a 12V supply
+    assert report.verdict().code == "UNDER_VOLTAGE"
+
+
+def test_a_single_sagging_servo_is_named():
+    servos = healthy_servos()
+    servos[2].voltage = 4.9
+    verdict = report_for(servos, motion_tested=True).verdict()
+    assert verdict.code == "UNDER_VOLTAGE"
+    assert "elbow_flex" in verdict.summary
+
+
+def test_servo_reported_fault_still_outranks_under_voltage():
+    servos = healthy_servos()
+    for servo in servos:
+        servo.voltage = 5.4
+    servos[0].error_bits = ERRBIT_VOLTAGE
+    report = report_for(servos, motion_tested=True)
+    assert report.verdict().code == "SERVO_ERROR"
+    assert "UNDER_VOLTAGE" in [i.code for i in report.secondary_issues()]
+
+
+def test_under_voltage_outranks_corruption():
+    """At this voltage nothing downstream is trustworthy."""
+    servos = healthy_servos()
+    for servo in servos:
+        servo.voltage = 5.4
+    servos[3].motion_corrupt = 30
+    report = report_for(servos, motion_tested=True)
+    assert report.verdict().code == "UNDER_VOLTAGE"
+    assert "CORRUPT" in [i.code for i in report.secondary_issues()]
+
+
+def test_missing_voltage_readings_do_not_trigger_it():
+    servos = healthy_servos()
+    for servo in servos:
+        servo.voltage = None
+    assert report_for(servos, motion_tested=True).verdict().code == "PASS"

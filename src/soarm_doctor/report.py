@@ -23,6 +23,20 @@ EXIT_NO_CONNECTION = 2
 #: degrees — well above sensor noise, far below any deliberate sweep.
 MIN_MEANINGFUL_SPAN = 50
 
+#: Below this, no STS3215 variant can drive its motor — the 7.4 V part wants
+#: 4.8 V minimum and the 12 V part 9 V, but at rest both will happily answer
+#: pings off a few volts of bus residue. A servo reporting less than this is
+#: being back-fed from the controller board with its supply off.
+#:
+#: This deliberately does not rely on the servo's own voltage error bit: that
+#: trips against a configured limit which, on a stock arm, is usually low enough
+#: never to fire. Real arms reporting 5.4 V passed clean before this check.
+MIN_OPERATING_VOLTAGE = 6.0
+
+#: Between this and MIN_OPERATING_VOLTAGE the arm is probably a 7.4 V variant, or
+#: a 12 V one on a sagging supply. Worth saying, not worth failing over.
+NOMINAL_12V_FLOOR = 9.0
+
 
 @dataclass
 class ServoResult:
@@ -101,6 +115,7 @@ class Report:
     motion_tested: bool = False
     motion_seconds: float = 0.0
     connection_error: str | None = None
+    min_operating_voltage: float = MIN_OPERATING_VOLTAGE
 
     # ---- aggregate views -------------------------------------------------
     @property
@@ -114,6 +129,16 @@ class Report:
     @property
     def servos_with_errors(self) -> list[ServoResult]:
         return [s for s in self.servos if s.error_bits]
+
+    @property
+    def min_voltage(self) -> float | None:
+        readings = [s.voltage for s in self.servos if s.voltage is not None]
+        return min(readings) if readings else None
+
+    @property
+    def servos_undervolt(self) -> list[ServoResult]:
+        """Servos reporting a voltage too low to actually drive the motor."""
+        return [s for s in self.servos if s.voltage is not None and s.voltage < self.min_operating_voltage]
 
     @property
     def servos_corrupt(self) -> list[ServoResult]:
@@ -208,6 +233,25 @@ class Report:
                     EXIT_FAIL,
                     f"servo reported a fault: {names}",
                     [explain_error(e) for e in worst.errors],
+                )
+            )
+
+        # Ranked here because it explains everything downstream: at this voltage
+        # the servos answer but cannot move, so every later symptom is noise.
+        if self.servos_undervolt:
+            lowest = self.min_voltage or 0.0
+            return_all = len(self.servos_undervolt) == len(self.servos)
+            who = "every servo" if return_all else ", ".join(s.name for s in self.servos_undervolt)
+            found.append(
+                Verdict(
+                    "UNDER_VOLTAGE",
+                    EXIT_FAIL,
+                    f"{who} reports {lowest:.1f}V — too low to drive the motors",
+                    [
+                        "The servo power supply is off or disconnected. The controller board runs "
+                        "off USB, so the servos answer at this voltage but will not move.",
+                        "Connect the supply (12V for a stock SO-100/SO-101), switch it on, re-run.",
+                    ],
                 )
             )
 

@@ -6,7 +6,7 @@ the arm. Read-only: nothing here enables torque or writes a servo register.
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .bus import ServoBus, decode_error, list_serial_ports
 from .checks import (

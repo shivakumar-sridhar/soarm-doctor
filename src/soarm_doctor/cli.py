@@ -21,7 +21,13 @@ from .checks import (
     run_motion_check,
     run_ping_check,
 )
-from .report import EXIT_NO_CONNECTION, MIN_MEANINGFUL_SPAN, Report, ServoResult
+from .report import (
+    EXIT_NO_CONNECTION,
+    MIN_MEANINGFUL_SPAN,
+    MIN_OPERATING_VOLTAGE,
+    Report,
+    ServoResult,
+)
 
 WIDTH = 64
 
@@ -88,11 +94,14 @@ def announce_servo(servo: ServoResult) -> None:
     print(f"{servo_line_prefix(servo)}{dim('checking...')}", end="", flush=True)
 
 
-def report_servo(servo: ServoResult) -> None:
+def report_servo(servo: ServoResult, min_voltage: float = MIN_OPERATING_VOLTAGE) -> None:
     """Overwrite the 'checking...' line with this servo's result."""
+    undervolt = servo.voltage is not None and servo.voltage < min_voltage
+
     telemetry = []
     if servo.voltage is not None:
-        telemetry.append(f"{servo.voltage:4.1f}V")
+        reading = f"{servo.voltage:4.1f}V"
+        telemetry.append(red(reading) if undervolt else reading)
     if servo.temperature is not None:
         telemetry.append(f"{servo.temperature:3d}C")
     readings = "  ".join(telemetry)
@@ -101,6 +110,9 @@ def report_servo(servo: ServoResult) -> None:
         outcome = red(f"{CROSS} no response")
     elif servo.errors:
         outcome = red(f"{CROSS} FAIL — {'/'.join(servo.errors)}")
+    elif undervolt:
+        # Answers fine, cannot move. Never let this read as "good!".
+        outcome = red(f"{CROSS} UNDER-VOLTAGE")
     elif not servo.stable:
         outcome = yellow(f"! flaky {servo.pings_ok}/{servo.pings_total}")
     else:
@@ -238,7 +250,9 @@ def _start_viz(args: argparse.Namespace, servos: list[ServoResult]):
             model=args.model,
             spawn=args.viz_spawn,
             save=args.viz_save,
-            web_port=9090,
+            web_port=args.viz_port,
+            grpc_port=args.viz_port + 786,
+            open_browser=not args.viz_no_open,
         )
         viz.start(servos)
     except Exception as exc:
@@ -246,10 +260,26 @@ def _start_viz(args: argparse.Namespace, servos: list[ServoResult]):
         return None
 
     if viz.url:
-        print(f"  {green('3D view')}: {viz.url}")
+        opened = "opening in your browser" if viz.open_browser else "open this"
+        print(f"  {green('3D view')} ({opened}): {viz.url}")
     elif args.viz_save:
         print(f"  {green('3D view')}: recording to {args.viz_save}")
     return viz
+
+
+def wait_for_viewer(viz) -> None:
+    """Hold the checks until the operator can actually see the arm.
+
+    The servo sequence is the thing worth watching and it's over in seconds, so
+    starting it while a browser tab is still loading wastes the whole point.
+    Skipped when there's no one at the keyboard or nothing to look at.
+    """
+    if viz is None or viz.save or not sys.stdin.isatty():
+        return
+    try:
+        input(f"    {dim('>> press ENTER once the arm is on screen (servos will light up in order)...')}")
+    except (EOFError, KeyboardInterrupt):
+        print()
 
 
 # --- main -------------------------------------------------------------------
@@ -262,15 +292,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(ARM_PROFILES), help="arm model")
     parser.add_argument("--baudrate", type=int, default=1_000_000)
     parser.add_argument("--pings", type=int, default=20, help="ping rounds in the power check")
+    parser.add_argument(
+        "--min-voltage",
+        type=float,
+        default=MIN_OPERATING_VOLTAGE,
+        help=f"fail below this servo voltage (default {MIN_OPERATING_VOLTAGE}V)",
+    )
     parser.add_argument("--quick", action="store_true", help="stages 1-2 only; no operator needed")
     parser.add_argument("--json", metavar="PATH", help="write the full report as JSON ('-' for stdout)")
     parser.add_argument("--list-ports", action="store_true", help="list serial ports and exit")
     parser.add_argument("--ids", help="comma-separated servo ids (default 1,2,3,4,5,6)")
     parser.add_argument("--names", help="comma-separated joint names, matched to --ids")
     viz = parser.add_argument_group("3D view (needs the viz extra)")
-    viz.add_argument("--viz", action="store_true", help="live 3D arm in a browser during the motion sweep")
+    viz.add_argument("--viz", action="store_true", help="live 3D arm, opened in your browser")
     viz.add_argument("--viz-spawn", action="store_true", help="desktop Rerun viewer instead of a browser")
     viz.add_argument("--viz-save", metavar="PATH", help="record the session to a .rrd file to attach to a bug report")
+    viz.add_argument("--viz-port", type=int, default=9090, help="web viewer port (default 9090)")
+    viz.add_argument("--viz-no-open", action="store_true", help="print the URL instead of opening a browser")
     parser.add_argument("--version", action="version", version=f"soarm-doctor {__version__}")
     return parser
 
@@ -282,6 +320,20 @@ def main(argv: list[str] | None = None) -> int:
         return print_ports()
 
     heading(f"soarm-doctor {__version__} — {args.model.upper()} health check")
+
+    servo_ids, joint_names = resolve_profile(
+        args.model,
+        [int(x) for x in args.ids.split(",")] if args.ids else None,
+        args.names.split(",") if args.names else None,
+    )
+    servos = make_servos(servo_ids, joint_names)
+
+    # The view comes up before anything is tested — it depends only on the model,
+    # not on the port — so the browser has the whole detection step to load.
+    viz = None
+    if args.viz or args.viz_spawn or args.viz_save:
+        print(f"\n{bold('3D VIEW')}")
+        viz = _start_viz(args, servos)
 
     # ---- [1/3] detection ----
     print(f"\n{bold('[1/3] USB DETECTION')}")
@@ -303,19 +355,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {yellow('note')}: several ports found — testing {selected.device}. Use --port to pick another.")
     print(f"  {green(TICK)} testing {selected.device}")
 
-    servo_ids, joint_names = resolve_profile(
-        args.model,
-        [int(x) for x in args.ids.split(",")] if args.ids else None,
-        args.names.split(",") if args.names else None,
-    )
-    servos = make_servos(servo_ids, joint_names)
     report = build_report(selected.device, args.model, selected.serial_id, servos)
-
-    # The 3D view comes up here, before anything is tested, so the arm is on
-    # screen with every servo grey and lights up as the checks run.
-    viz = None
-    if args.viz or args.viz_spawn or args.viz_save:
-        viz = _start_viz(args, servos)
+    report.min_operating_voltage = args.min_voltage
 
     bus = ServoBus(selected.device, args.baudrate)
     try:
@@ -328,6 +369,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # ---- [2/3] servos, one at a time ----
         print(f"\n{bold('[2/3] SERVOS + POWER')}  {dim(f'({args.pings} pings each, in order)')}")
+        wait_for_viewer(viz)
 
         def servo_started(servo: ServoResult) -> None:
             announce_servo(servo)
@@ -335,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
                 viz.mark_checking(servo)
 
         def servo_finished(servo: ServoResult) -> None:
-            report_servo(servo)
+            report_servo(servo, args.min_voltage)
             if viz is not None:
                 viz.mark_checked(servo)
 
@@ -349,7 +391,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if not report.any_responded:
             return render_verdict(report)
-        if report.all_stable and not report.servos_with_errors:
+        if report.all_stable and not report.servos_with_errors and not report.servos_undervolt:
             print(f"  {green(TICK)} all {len(servos)} servos responding and stable.")
 
         # ---- [3/3] motion ----

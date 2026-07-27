@@ -73,6 +73,14 @@ Stage 2 also asks each servo for its own voltage, temperature and status error
 byte. That's the difference between "flaky, maybe power?" and "shoulder_lift is
 seeing 9.1 V".
 
+It also catches the case that looks healthiest of all: **an arm with its power
+supply switched off.** The servos answer every ping — their logic runs off a
+couple of volts bled from the controller board's USB rail — and their own
+voltage error bit never fires, because that trips against a configured limit
+stock arms leave low. Everything reads stable, and nothing can move. Any servo
+reporting below `--min-voltage` (default 6 V, under every STS3215 variant's
+minimum) fails outright.
+
 ## What each verdict means
 
 | Verdict | Meaning | What to do |
@@ -80,6 +88,7 @@ seeing 9.1 V".
 | `NO_PORT` | No serial port at all | Plug into the computer directly, not a hub. Try another cable — some are charge-only. |
 | `NO_CONNECTION` | Port exists, won't open | `sudo chmod 666 /dev/ttyACM0`, or close whatever else is holding it. |
 | `NO_POWER` | USB fine, no servo answers | The board runs off USB; the motors don't. Connect the power supply. |
+| `UNDER_VOLTAGE` | Servos answer, but too low to move | Supply off or disconnected — they're running on bus residue. Connect 12 V and re-run. |
 | `SERVO_ERROR` | A servo reports a fault itself | Read the flag: voltage / overheat / overload / overcurrent / angle. |
 | `FLAKY` | Servos drop in and out at rest | Usually an under-rated supply. 12 V 2 A is marginal; 12 V 5 A is reliable. Otherwise reseat connectors. |
 | `CORRUPT` | Garbage reads while moving | Replace the servo cable on the named joint. Reseating won't hold. |

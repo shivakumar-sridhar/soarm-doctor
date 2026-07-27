@@ -202,12 +202,14 @@ class RerunViz:
         save: str | None = None,
         web_port: int = 9090,
         grpc_port: int = 9876,
+        open_browser: bool = True,
     ) -> None:
         self.model = model
         self.spawn = spawn
         self.save = save
         self.web_port = web_port
         self.grpc_port = grpc_port
+        self.open_browser = open_browser
         self._tree = None
         self._joints: dict[str, object] = {}
         self._servo_paths: dict[str, list[str]] = {}
@@ -233,7 +235,9 @@ class RerunViz:
             rr.spawn(default_blueprint=blueprint)
         else:
             uri = rr.serve_grpc(grpc_port=self.grpc_port, default_blueprint=blueprint)
-            rr.serve_web_viewer(web_port=self.web_port, open_browser=False, connect_to=uri)
+            # Opening the tab here matters: the checks take seconds, and a user
+            # who has to copy a link misses the whole sequence.
+            rr.serve_web_viewer(web_port=self.web_port, open_browser=self.open_browser, connect_to=uri)
             self.url = f"http://localhost:{self.web_port}/?url={uri}"
 
         self._tree = rr.urdf.UrdfTree.from_file_path(str(urdf_path))
