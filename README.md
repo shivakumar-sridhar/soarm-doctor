@@ -9,21 +9,40 @@ usual advice is "check your cables"; this tells you *which* cable.
 ```
 $ soarm-doctor
 ================================================================
-  soarm-doctor 0.1.0 — SO101 health check
+  soarm-doctor — SO101 health check
 ================================================================
 
 [1/3] USB DETECTION
   • /dev/ttyACM0  serial A1B2C3D4E5  CH340/CH341
   ✓ testing /dev/ttyACM0
 
-[2/3] SERVOS + POWER  (20 pings)
-    servo 1 shoulder_pan   20/20 ok  12.1V   33C
-    servo 2 shoulder_lift  14/20 !!   9.1V   34C  voltage
-    servo 3 elbow_flex     20/20 ok  12.1V   31C
-    ...
+[2/3] SERVOS + POWER  (20 pings each · 12v motors · needs 9.0V)
+    servo 1 shoulder_pan   ✓ good!                      12.1V   33C
+    servo 2 shoulder_lift  ✗ FAIL — voltage              9.1V   34C
+    servo 3 elbow_flex     ✓ good!                      12.1V   31C
+    servo 4 wrist_flex     ✓ good!                      12.1V   32C
+    servo 5 wrist_roll     ✓ good!                      12.0V   31C
+    servo 6 gripper        ✓ good!                      12.1V   30C
+
+[3/3] MOTION — data integrity while the arm moves
+    >> press ENTER, then sweep every joint and the gripper. Ctrl-C when done...
+
+    JOINT             POS   MIN   MAX  SPAN   STATUS
+    shoulder_pan     2104   838  3441  2603   ok
+    shoulder_lift    1993   892  3055  2163   voltage
+    elbow_flex       2210  1048  3220  2172   ok
+    wrist_flex        ---     0     0     0   CORRUPT x67
+    wrist_roll       2044   199  4031  3832   ok
+    gripper          2301  1716  2890  1174   ok
+
 ================================================================
   ✗ FAIL [SERVO_ERROR] — servo reported a fault: shoulder_lift (voltage)
     → input voltage out of range — check the power supply and its rating
+
+  also found
+    ✗ [CORRUPT] corrupted reads while moving: wrist_flex
+      → Replace the servo cable on: wrist_flex.
+      → Reseating usually will not hold — the cable flexes and fails again under motion.
 ================================================================
 ```
 
@@ -77,9 +96,35 @@ It also catches the case that looks healthiest of all: **an arm with its power
 supply switched off.** The servos answer every ping — their logic runs off a
 couple of volts bled from the controller board's USB rail — and their own
 voltage error bit never fires, because that trips against a configured limit
-stock arms leave low. Everything reads stable, and nothing can move. Any servo
-reporting below `--min-voltage` (default 6 V, under every STS3215 variant's
-minimum) fails outright.
+stock arms leave low. Everything reads stable, and nothing can move.
+
+## Telling it what your arm is
+
+The voltage a servo needs depends on two things the tool can't detect, so say
+which you have. It defaults to a stock 12 V follower.
+
+```bash
+soarm-doctor --motors 7.4v      # 7.4 V STS3215s (spec down to 4.8 V)
+soarm-doctor --leader           # backdriven by hand, torque off
+soarm-doctor --min-voltage 5.0  # explicit floor, overrides both
+```
+
+`--leader` matters more than it looks. A leader arm is moved by hand with torque
+disabled, so it never needs drive voltage at all — only enough to keep its
+encoders alive. Holding it to a follower's floor fails perfectly good arms.
+
+| Arm | Floor |
+|---|---|
+| `--motors 12v` (default) | 9.0 V |
+| `--motors 7.4v` | 4.8 V |
+| `--leader` | 4.0 V — encoders only |
+
+The stage-2 header always shows which profile is in force, so a wrong assumption
+is visible before it becomes a confusing failure:
+
+```
+[2/3] SERVOS + POWER  (20 pings each · 7.4v motors · needs 4.8V)
+```
 
 ## What each verdict means
 
@@ -88,7 +133,7 @@ minimum) fails outright.
 | `NO_PORT` | No serial port at all | Plug into the computer directly, not a hub. Try another cable — some are charge-only. |
 | `NO_CONNECTION` | Port exists, won't open | `sudo chmod 666 /dev/ttyACM0`, or close whatever else is holding it. |
 | `NO_POWER` | USB fine, no servo answers | The board runs off USB; the motors don't. Connect the power supply. |
-| `UNDER_VOLTAGE` | Servos answer, but too low to move | Supply off or disconnected — they're running on bus residue. Connect 12 V and re-run. |
+| `UNDER_VOLTAGE` | Servos answer, but too low to move | Supply off or disconnected. Or the arm is a 7.4 V variant or a leader — see below. |
 | `SERVO_ERROR` | A servo reports a fault itself | Read the flag: voltage / overheat / overload / overcurrent / angle. |
 | `FLAKY` | Servos drop in and out at rest | Usually an under-rated supply. 12 V 2 A is marginal; 12 V 5 A is reliable. Otherwise reseat connectors. |
 | `CORRUPT` | Garbage reads while moving | Replace the servo cable on the named joint. Reseating won't hold. |

@@ -29,6 +29,14 @@ from pathlib import Path
 
 from .report import MIN_MEANINGFUL_SPAN, ServoResult
 
+
+class VizUnavailable(RuntimeError):
+    """The optional 3D dependencies aren't installed.
+
+    Distinct from a view that failed for some other reason, so the CLI can say
+    "install the extra" rather than surfacing an import error.
+    """
+
 # --- assets -----------------------------------------------------------------
 # URDF + meshes come from TheRobotStudio/SO-ARM100 (Apache-2.0), pinned to a
 # commit so a future upstream change can't silently alter what users see.
@@ -223,7 +231,7 @@ class RerunViz:
             import rerun as rr
             import rerun.blueprint as rrb
         except ImportError as exc:  # pragma: no cover - depends on the extra
-            raise RuntimeError("3D view needs the viz extra: pip install 'soarm-doctor[viz]'") from exc
+            raise VizUnavailable("3D view needs the viz extra — pip install 'soarm-doctor[viz]'") from exc
 
         urdf_path = ensure_assets(self.model)
         blueprint = self._blueprint(rrb)

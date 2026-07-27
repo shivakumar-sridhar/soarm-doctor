@@ -22,11 +22,15 @@ from .checks import (
     run_ping_check,
 )
 from .report import (
+    DEFAULT_MOTOR_VARIANT,
     EXIT_NO_CONNECTION,
+    EXIT_PASS,
     MIN_MEANINGFUL_SPAN,
     MIN_OPERATING_VOLTAGE,
+    MOTOR_VARIANTS,
     Report,
     ServoResult,
+    min_voltage_for,
 )
 
 WIDTH = 64
@@ -240,7 +244,7 @@ def _start_viz(args: argparse.Namespace, servos: list[ServoResult]):
     path is the product; the 3D is a convenience.
     """
     try:
-        from .viz import RerunViz
+        from .viz import RerunViz, VizUnavailable
     except ImportError:
         print(f"  {yellow('note')}: 3D view needs the extra — pip install 'soarm-doctor[viz]'. Continuing without it.")
         return None
@@ -255,6 +259,9 @@ def _start_viz(args: argparse.Namespace, servos: list[ServoResult]):
             open_browser=not args.viz_no_open,
         )
         viz.start(servos)
+    except VizUnavailable as exc:
+        print(f"  {yellow('note')}: {exc}. Continuing without it.")
+        return None
     except Exception as exc:
         print(f"  {yellow('note')}: could not start the 3D view ({exc}). Continuing without it.")
         return None
@@ -293,10 +300,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baudrate", type=int, default=1_000_000)
     parser.add_argument("--pings", type=int, default=20, help="ping rounds in the power check")
     parser.add_argument(
+        "--motors",
+        default=DEFAULT_MOTOR_VARIANT,
+        choices=sorted(MOTOR_VARIANTS),
+        help=f"servo voltage variant (default {DEFAULT_MOTOR_VARIANT})",
+    )
+    parser.add_argument(
+        "--leader",
+        action="store_true",
+        help="arm is backdriven by hand with torque off — skip the drive-voltage requirement",
+    )
+    parser.add_argument(
         "--min-voltage",
         type=float,
-        default=MIN_OPERATING_VOLTAGE,
-        help=f"fail below this servo voltage (default {MIN_OPERATING_VOLTAGE}V)",
+        default=None,
+        help="explicit voltage floor, overriding --motors / --leader",
     )
     parser.add_argument("--quick", action="store_true", help="stages 1-2 only; no operator needed")
     parser.add_argument("--json", metavar="PATH", help="write the full report as JSON ('-' for stdout)")
@@ -314,6 +332,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Entry point. Wraps the run so a closed pipe isn't reported as a crash."""
+    try:
+        return _run(argv)
+    except BrokenPipeError:
+        # Something downstream stopped reading (`| head`, `| grep -q`). Python
+        # would otherwise fail flushing stdout at shutdown and exit 120, which
+        # looks like the check itself blew up. Point stdout at devnull so the
+        # interpreter can shut down quietly.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return EXIT_PASS
+
+
+def _run(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.list_ports:
@@ -356,7 +387,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  {green(TICK)} testing {selected.device}")
 
     report = build_report(selected.device, args.model, selected.serial_id, servos)
-    report.min_operating_voltage = args.min_voltage
+    report.min_operating_voltage = (
+        args.min_voltage if args.min_voltage is not None else min_voltage_for(args.motors, args.leader)
+    )
 
     bus = ServoBus(selected.device, args.baudrate)
     try:
@@ -368,7 +401,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         # ---- [2/3] servos, one at a time ----
-        print(f"\n{bold('[2/3] SERVOS + POWER')}  {dim(f'({args.pings} pings each, in order)')}")
+        role = "leader, backdriven" if args.leader else f"{args.motors} motors"
+        print(
+            f"\n{bold('[2/3] SERVOS + POWER')}  "
+            f"{dim(f'({args.pings} pings each · {role} · needs {report.min_operating_voltage:.1f}V)')}"
+        )
         wait_for_viewer(viz)
 
         def servo_started(servo: ServoResult) -> None:
@@ -377,7 +414,7 @@ def main(argv: list[str] | None = None) -> int:
                 viz.mark_checking(servo)
 
         def servo_finished(servo: ServoResult) -> None:
-            report_servo(servo, args.min_voltage)
+            report_servo(servo, report.min_operating_voltage)
             if viz is not None:
                 viz.mark_checked(servo)
 

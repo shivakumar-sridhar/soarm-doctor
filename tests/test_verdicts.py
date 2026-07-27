@@ -10,7 +10,7 @@ import pytest
 
 from soarm_doctor.bus import ERRBIT_OVERHEAT, ERRBIT_VOLTAGE, decode_error
 from soarm_doctor.checks import SOARM_JOINTS, make_servos, resolve_profile
-from soarm_doctor.report import EXIT_FAIL, EXIT_NO_CONNECTION, EXIT_PASS, Report
+from soarm_doctor.report import EXIT_FAIL, EXIT_NO_CONNECTION, EXIT_PASS, Report, min_voltage_for
 
 
 def healthy_servos(pings: int = 20, span: int = 2000):
@@ -182,29 +182,64 @@ def test_corrupting_joint_is_not_also_reported_as_unswept():
 
 # --- under-voltage (found on real hardware: an unpowered arm passed clean,
 # because servos answer off the board's USB rail and never set the error bit) --
-def test_servos_answering_on_bus_residue_do_not_pass():
-    """Real case: six servos at 5.4V, all stable, previously reported PASS."""
+def at_voltage(volts: float):
     servos = healthy_servos()
     for servo in servos:
-        servo.voltage = 5.4
-    verdict = report_for(servos, motion_tested=True).verdict()
+        servo.voltage = volts
+    return servos
+
+
+def report_at(volts: float, motors: str = "12v", leader: bool = False) -> Report:
+    report = report_for(at_voltage(volts), motion_tested=True)
+    report.min_operating_voltage = min_voltage_for(motors, leader)
+    return report
+
+
+def test_unpowered_12v_arm_does_not_pass():
+    """Real case: six servos at 5.4V, all stable, previously reported PASS."""
+    verdict = report_at(5.4).verdict()
     assert verdict.code == "UNDER_VOLTAGE"
     assert verdict.exit_code == EXIT_FAIL
     assert "5.4V" in verdict.summary
-    assert any("power supply" in r for r in verdict.remedies)
+
+
+def test_the_failure_explains_both_escape_hatches():
+    """A legitimate 7.4V or leader arm must be told how to say so."""
+    remedies = " ".join(report_at(5.4).verdict().remedies)
+    assert "--motors 7.4v" in remedies
+    assert "--leader" in remedies
 
 
 def test_normal_12v_arm_is_unaffected():
-    servos = healthy_servos()  # 12.1V
-    assert report_for(servos, motion_tested=True).verdict().code == "PASS"
+    assert report_at(12.1).verdict().code == "PASS"
 
 
-def test_a_74v_variant_still_passes():
-    """7.4V arms are legitimate; the threshold sits below every variant."""
-    servos = healthy_servos()
-    for servo in servos:
-        servo.voltage = 7.2
-    assert report_for(servos, motion_tested=True).verdict().code == "PASS"
+def test_a_74v_arm_at_54v_is_healthy():
+    """The reported case: 7.4V motors running at 5.4V are well within spec."""
+    assert report_at(5.4, motors="7.4v").verdict().code == "PASS"
+
+
+def test_a_12v_arm_at_the_same_voltage_still_fails():
+    """Same reading, different arm — the variant is what decides."""
+    assert report_at(5.4, motors="12v").verdict().code == "UNDER_VOLTAGE"
+
+
+def test_a_leader_arm_needs_no_drive_voltage():
+    """Backdriven by hand with torque off; it only has to power its encoders."""
+    assert report_at(5.4, leader=True).verdict().code == "PASS"
+    assert report_at(4.5, leader=True).verdict().code == "PASS"
+
+
+def test_a_leader_with_dying_encoders_still_fails():
+    assert report_at(3.2, leader=True).verdict().code == "UNDER_VOLTAGE"
+
+
+def test_leader_overrides_the_motor_variant():
+    assert report_at(5.0, motors="12v", leader=True).verdict().code == "PASS"
+
+
+def test_a_74v_arm_below_its_own_spec_fails():
+    assert report_at(4.1, motors="7.4v").verdict().code == "UNDER_VOLTAGE"
 
 
 def test_threshold_is_configurable():

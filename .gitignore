@@ -11,3 +11,4 @@ dist/
 htmlcov/
 report.json
 .DS_Store
+dist/

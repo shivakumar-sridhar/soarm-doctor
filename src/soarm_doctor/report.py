@@ -23,19 +23,34 @@ EXIT_NO_CONNECTION = 2
 #: degrees — well above sensor noise, far below any deliberate sweep.
 MIN_MEANINGFUL_SPAN = 50
 
-#: Below this, no STS3215 variant can drive its motor — the 7.4 V part wants
-#: 4.8 V minimum and the 12 V part 9 V, but at rest both will happily answer
-#: pings off a few volts of bus residue. A servo reporting less than this is
-#: being back-fed from the controller board with its supply off.
+#: Drive-voltage floor per motor variant. Below these an STS3215 will still
+#: answer pings — its logic runs off almost anything, including a couple of
+#: volts bled from the controller board's USB rail — but it cannot turn.
 #:
 #: This deliberately does not rely on the servo's own voltage error bit: that
 #: trips against a configured limit which, on a stock arm, is usually low enough
-#: never to fire. Real arms reporting 5.4 V passed clean before this check.
-MIN_OPERATING_VOLTAGE = 6.0
+#: never to fire. An unpowered 12 V arm reporting 5.4 V passed clean before it.
+MOTOR_VARIANTS = {
+    "12v": 9.0,
+    "7.4v": 4.8,
+}
+DEFAULT_MOTOR_VARIANT = "12v"
 
-#: Between this and MIN_OPERATING_VOLTAGE the arm is probably a 7.4 V variant, or
-#: a 12 V one on a sagging supply. Worth saying, not worth failing over.
-NOMINAL_12V_FLOOR = 9.0
+#: A leader arm is backdriven by hand with torque disabled, so drive voltage is
+#: irrelevant to it — it only has to keep its encoders powered and talking.
+#: Checking it against a follower's floor is meaningless and fails good arms.
+LEADER_MIN_VOLTAGE = 4.0
+
+#: Kept as the module-level default for callers that don't care about variant
+#: or role. Equivalent to a stock 12 V follower.
+MIN_OPERATING_VOLTAGE = MOTOR_VARIANTS[DEFAULT_MOTOR_VARIANT]
+
+
+def min_voltage_for(motors: str = DEFAULT_MOTOR_VARIANT, leader: bool = False) -> float:
+    """Voltage floor for this arm, given what it actually has to do."""
+    if leader:
+        return LEADER_MIN_VOLTAGE
+    return MOTOR_VARIANTS.get(motors, MIN_OPERATING_VOLTAGE)
 
 
 @dataclass
@@ -240,17 +255,20 @@ class Report:
         # the servos answer but cannot move, so every later symptom is noise.
         if self.servos_undervolt:
             lowest = self.min_voltage or 0.0
-            return_all = len(self.servos_undervolt) == len(self.servos)
-            who = "every servo" if return_all else ", ".join(s.name for s in self.servos_undervolt)
+            everyone = len(self.servos_undervolt) == len(self.servos)
+            who = "every servo" if everyone else ", ".join(s.name for s in self.servos_undervolt)
             found.append(
                 Verdict(
                     "UNDER_VOLTAGE",
                     EXIT_FAIL,
-                    f"{who} reports {lowest:.1f}V — too low to drive the motors",
+                    f"{who} reports {lowest:.1f}V — below the {self.min_operating_voltage:.1f}V "
+                    f"this arm needs to drive its motors",
                     [
-                        "The servo power supply is off or disconnected. The controller board runs "
-                        "off USB, so the servos answer at this voltage but will not move.",
-                        "Connect the supply (12V for a stock SO-100/SO-101), switch it on, re-run.",
+                        "If the supply should be on: it isn't. The board runs off USB, so the servos "
+                        "answer at this voltage but cannot turn. Connect it and re-run.",
+                        "If this arm has 7.4V motors, pass --motors 7.4v.",
+                        "If you use it as a leader (backdriven by hand, torque off), pass --leader — "
+                        "drive voltage doesn't apply.",
                     ],
                 )
             )
