@@ -136,22 +136,36 @@ pip install 'soarm-doctor[viz]'
 soarm-doctor --model so100 --viz
 ```
 
-Opens a browser tab with the arm in 3D. As you sweep each joint, the on-screen
-arm moves with it and the joint turns green; a joint you haven't touched stays
-grey, and one with a fault turns red. Alongside it are plots of encoder position
-and corrupt-read count over time.
+The arm appears in a browser tab as soon as the USB port is found, **body
+ghosted and the six servos solid**, so the picture carries exactly one message:
+which motor is healthy and which isn't.
 
-The point isn't a picture of a red joint — the table already tells you that in
-fewer characters. It's that **the arm moving on screen in sync with the one in
-your hands** verifies the encoder reads, the direction and the range in a single
-glance, and makes a joint you forgot to sweep obvious without reading anything.
+Then the servos are checked **one at a time, in order**. Each lights up blue
+while it's being tested, then turns green or red — matching the terminal
+line-by-line, so you can watch either screen:
+
+```
+    servo 1 shoulder_pan   ✓ good!                      12.1V   34C
+    servo 2 shoulder_lift  ✗ FAIL — voltage             12.1V   34C
+    servo 3 elbow_flex     ✓ good!                      12.1V   34C
+```
+
+During the motion sweep the arm then tracks your hand, with plots of encoder
+position and corrupt-read count alongside. That tracking is the real feature —
+an arm moving on screen **in sync with the one in your hands** verifies the
+encoder reads, the direction and the range in a single glance.
 
 | Colour | Meaning |
 |---|---|
-| grey | not swept yet |
-| green | swept, clean |
+| grey | not checked yet |
+| blue | being checked right now |
+| green | responding and stable |
 | amber | dropped packets |
-| red | corruption or a servo-reported fault |
+| red | no response, corruption, or a servo-reported fault |
+
+The SO-ARM URDFs model each link as a body mesh plus a separate motor mesh, and
+the servo driving a joint lives in that joint's parent link — so "ghost the body,
+colour the servos" is an exact mapping onto the real motors, not an approximation.
 
 ```bash
 soarm-doctor --viz-spawn              # desktop viewer instead of a browser

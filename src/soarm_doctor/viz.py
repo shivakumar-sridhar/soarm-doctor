@@ -1,14 +1,19 @@
-"""Optional live 3D view of the arm during the motion sweep.
+"""Optional live 3D view of the arm.
 
-The value here isn't a pretty picture of a red joint — a terminal table already
-says which servo is bad in fewer characters. It's that the on-screen arm moves
-*in sync with the one in your hands*, which verifies the encoder reads, the
-direction and the range in a single glance, and makes a joint you forgot to
-sweep obvious without reading a table.
+The arm body is rendered ghosted and the six **servos** are drawn solid, so the
+picture carries exactly one message: which motor is healthy and which isn't.
+Servos light up one at a time as they're checked, then track your hand during
+the motion sweep.
 
-Pose fidelity is deliberately approximate: ticks are mapped to radians about the
-servo's mid-point, so a joint whose zero is offset will render rotated. This is a
-liveness check, not a calibrated digital twin, and the tool says so on screen.
+That last part is the real feature. A red joint is something a terminal table
+already tells you in fewer characters; an arm that moves on screen *in sync with
+the one in your hands* verifies the encoder reads, the direction and the range in
+a single glance.
+
+The SO-ARM URDFs model each link as a body mesh plus a separate motor mesh
+(``Base.stl`` + ``Base_Motor.stl``), and the servo driving a joint lives in that
+joint's **parent** link — so "ghost the body, colour the servos" is an exact
+mapping rather than an approximation.
 
 Requires the ``viz`` extra::
 
@@ -87,40 +92,61 @@ def ensure_assets(model: str, quiet: bool = False) -> Path:
     return urdf
 
 
-# --- status → colour --------------------------------------------------------
-COLOUR_UNTESTED = (140, 140, 145, 255)
+# --- colours ----------------------------------------------------------------
+# RGBA. The body is ghosted so the solid servos read as the only signal.
+COLOUR_BODY = (120, 125, 135, 40)
+COLOUR_UNCHECKED = (150, 150, 155, 255)
+COLOUR_CHECKING = (90, 160, 245, 255)
 COLOUR_OK = (60, 190, 110, 255)
 COLOUR_DROPS = (230, 180, 60, 255)
 COLOUR_BAD = (225, 70, 80, 255)
 
-TICKS_PER_TURN = 4096
-TICK_CENTRE = 2048  # STS3215 mid-scale
-
-
-def servo_status(servo: ServoResult) -> str:
-    """One of: bad, drops, untested, ok. Mirrors the terminal table's ranking."""
-    if servo.motion_corrupt or servo.error_bits:
-        return "bad"
-    if servo.motion_commfail > 5:
-        return "drops"
-    if servo.span < MIN_MEANINGFUL_SPAN:
-        return "untested"
-    return "ok"
-
-
 STATUS_COLOURS = {
-    "bad": COLOUR_BAD,
-    "drops": COLOUR_DROPS,
-    "untested": COLOUR_UNTESTED,
+    "unchecked": COLOUR_UNCHECKED,
+    "checking": COLOUR_CHECKING,
     "ok": COLOUR_OK,
+    "drops": COLOUR_DROPS,
+    "bad": COLOUR_BAD,
+    # "untested" means swept-stage-not-yet-moved; same grey as unchecked.
+    "untested": COLOUR_UNCHECKED,
 }
 
+TICKS_PER_TURN = 4096
+TICK_CENTRE = 2048  # STS3215 mid-scale
 
 #: Ticks of travel before the observed range is trusted for scaling. Below this
 #: the range is still growing every frame and mapping through it would make the
 #: on-screen joint jump around; ~400 ticks is about 35 degrees, well past an
 #: accidental nudge.
 SWEEP_FOR_RANGE_MAPPING = 400
+
+
+def ping_status(servo: ServoResult) -> str:
+    """Status after this servo's own power/response check.
+
+    Distinct from :func:`servo_status`: at this point nothing has been swept, so
+    a healthy servo should read as "ok", not as "you haven't moved it yet".
+    """
+    if servo.error_bits or not servo.responded:
+        return "bad"
+    if not servo.stable:
+        return "drops"
+    return "ok"
+
+
+def servo_status(servo: ServoResult) -> str:
+    """Status during the motion sweep. Mirrors the terminal table's ranking."""
+    if servo.motion_corrupt or servo.error_bits:
+        return "bad"
+    if servo.motion_commfail > 5:
+        return "drops"
+    # Only a servo that was actually pinged and stayed silent counts as bad;
+    # one that hasn't been checked yet is simply unknown.
+    if servo.pings_total and not servo.responded:
+        return "bad"
+    if servo.span < MIN_MEANINGFUL_SPAN:
+        return "untested"
+    return "ok"
 
 
 def ticks_to_radians(ticks: int, lower: float, upper: float) -> float:
@@ -159,10 +185,14 @@ def joint_angle(servo: ServoResult, lower: float, upper: float) -> float | None:
 
 # --- the view ---------------------------------------------------------------
 class RerunViz:
-    """Streams the sweep into a Rerun viewer: 3D arm plus per-joint plots.
+    """Streams the check into a Rerun viewer: ghosted arm, solid servos, plots.
 
-    Built for the `on_update` hook of :func:`~soarm_doctor.checks.run_motion_check`,
-    so the same poll loop drives the terminal table and this.
+    Lifecycle mirrors the CLI's stages::
+
+        viz.start(servos)          # arm on screen, every servo grey
+        viz.mark_checking(servo)   # this one is being tested now
+        viz.mark_checked(servo)    # -> green or red
+        viz.update(servos, t)      # motion sweep: poses + plots
     """
 
     def __init__(
@@ -180,11 +210,12 @@ class RerunViz:
         self.grpc_port = grpc_port
         self._tree = None
         self._joints: dict[str, object] = {}
-        self._link_paths: dict[str, list[str]] = {}
+        self._servo_paths: dict[str, list[str]] = {}
         self._last_status: dict[str, str] = {}
         self._frame = 0
         self.url: str | None = None
 
+    # -- setup --
     def start(self, servos: list[ServoResult]) -> None:
         try:
             import rerun as rr
@@ -193,37 +224,64 @@ class RerunViz:
             raise RuntimeError("3D view needs the viz extra: pip install 'soarm-doctor[viz]'") from exc
 
         urdf_path = ensure_assets(self.model)
+        blueprint = self._blueprint(rrb)
 
-        rr.init("soarm-doctor", default_blueprint=self._blueprint(rrb))
+        rr.init("soarm-doctor", default_blueprint=blueprint)
         if self.save:
             rr.save(self.save)
         elif self.spawn:
-            rr.spawn(default_blueprint=self._blueprint(rrb))
+            rr.spawn(default_blueprint=blueprint)
         else:
-            uri = rr.serve_grpc(grpc_port=self.grpc_port, default_blueprint=self._blueprint(rrb))
+            uri = rr.serve_grpc(grpc_port=self.grpc_port, default_blueprint=blueprint)
             rr.serve_web_viewer(web_port=self.web_port, open_browser=False, connect_to=uri)
             self.url = f"http://localhost:{self.web_port}/?url={uri}"
 
         self._tree = rr.urdf.UrdfTree.from_file_path(str(urdf_path))
         self._tree.log_urdf_to_recording()
+        self._resolve(servos)
+        self._ghost_body()
+        for servo in servos:
+            self._paint(servo.name, "unchecked")
 
-        # Resolve each servo to its URDF joint and the geometry of the link that
-        # joint drives. A servo whose name has no counterpart in the URDF (a
-        # custom --names run) simply gets no 3D representation.
+    def _resolve(self, servos: list[ServoResult]) -> None:
+        """Find each servo's joint and its motor mesh.
+
+        The motor that drives a joint sits in the joint's *parent* link, and the
+        URDF lists it as that link's second visual geometry.
+        """
         for servo in servos:
             joint = self._tree.get_joint_by_name(servo.name)
             if joint is None:
-                continue
+                continue  # custom --names run with no URDF counterpart
             self._joints[servo.name] = joint
-            child = self._tree.get_joint_child(joint)
-            link_name = getattr(child, "name", None) or str(child)
-            self._link_paths[servo.name] = self._tree.get_visual_geometry_paths(link_name)
-            self._paint(servo.name, "untested")
+            visuals = self._tree.get_visual_geometry_paths(joint.parent_link)
+            # visual_1 is the motor; fall back to the whole link if a model
+            # doesn't split them out.
+            self._servo_paths[servo.name] = visuals[1:2] or visuals
+
+    def _ghost_body(self) -> None:
+        """Fade every mesh that isn't one of the six servos."""
+        import rerun as rr
+
+        servo_meshes = {p for paths in self._servo_paths.values() for p in paths}
+        for link in self._all_links():
+            for path in self._tree.get_visual_geometry_paths(link):
+                if path not in servo_meshes:
+                    rr.log(path, rr.Asset3D.from_fields(albedo_factor=list(COLOUR_BODY)), static=True)
+
+    def _all_links(self) -> list[str]:
+        links = []
+        for joint in self._joints.values():
+            for link in (joint.parent_link, joint.child_link):
+                name = getattr(link, "name", link)
+                if name not in links:
+                    links.append(name)
+        return links
 
     def _blueprint(self, rrb):
         return rrb.Blueprint(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="arm — colour is joint health"),
+                rrb.Spatial3DView(name="servos — grey unchecked · green ok · red fault"),
                 rrb.Vertical(
                     rrb.TimeSeriesView(origin="joint", name="encoder position"),
                     rrb.TimeSeriesView(origin="fault", name="corrupt reads"),
@@ -233,17 +291,27 @@ class RerunViz:
             collapse_panels=True,
         )
 
+    # -- painting --
     def _paint(self, servo_name: str, status: str) -> None:
-        """Tint the link this joint drives. Only re-logged when status changes."""
+        """Colour this servo's motor mesh. Only re-logged when status changes."""
         import rerun as rr
 
         if self._last_status.get(servo_name) == status:
             return
         self._last_status[servo_name] = status
         colour = list(STATUS_COLOURS[status])
-        for path in self._link_paths.get(servo_name, []):
+        for path in self._servo_paths.get(servo_name, []):
             rr.log(path, rr.Asset3D.from_fields(albedo_factor=colour), static=True)
 
+    def mark_checking(self, servo: ServoResult) -> None:
+        """This servo is under test right now."""
+        self._paint(servo.name, "checking")
+
+    def mark_checked(self, servo: ServoResult) -> None:
+        """This servo's power/response check finished — green or red."""
+        self._paint(servo.name, ping_status(servo))
+
+    # -- motion --
     def update(self, servos: list[ServoResult], elapsed: float) -> None:
         """Drop-in for `run_motion_check(on_update=...)`."""
         import rerun as rr
@@ -261,7 +329,11 @@ class RerunViz:
             if servo.position is not None:
                 rr.log(f"joint/{servo.name}", rr.Scalars(float(servo.position)))
             rr.log(f"fault/{servo.name}", rr.Scalars(float(servo.motion_corrupt)))
-            self._paint(servo.name, servo_status(servo))
+            # Only ever downgrade during the sweep: a servo that passed its power
+            # check stays green unless the motion stage finds something wrong.
+            status = servo_status(servo)
+            if status != "untested":
+                self._paint(servo.name, status)
 
     def close(self) -> None:
         pass

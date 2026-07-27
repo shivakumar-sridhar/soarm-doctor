@@ -123,12 +123,63 @@ def test_viz_resolves_every_joint_and_colours_faults(tmp_path):
     viz.start(servos)
 
     assert set(viz._joints) == set(SOARM_JOINTS)
-    assert all(viz._link_paths[name] for name in SOARM_JOINTS)
+    assert all(viz._servo_paths[name] for name in SOARM_JOINTS)
 
     viz.update(servos, elapsed=1.0)
     assert viz._last_status["shoulder_lift"] == "bad"
     assert viz._last_status["wrist_flex"] == "bad"
-    assert viz._last_status["shoulder_pan"] == "untested"
+    # The sweep only ever downgrades: a healthy servo keeps the colour its power
+    # check gave it rather than reverting to grey for not having moved yet.
+    assert viz._last_status["shoulder_pan"] == "unchecked"
+
+
+@pytest.mark.skipif(
+    not (cache_dir() / "so100" / "so100.urdf").exists(),
+    reason="3D assets not cached; run once with --viz to download",
+)
+def test_servos_map_to_motor_meshes_not_whole_links(tmp_path):
+    """The URDF splits body and motor geometry; only the motor gets coloured."""
+    from soarm_doctor.viz import RerunViz
+
+    servos = make_servos(list(range(1, 7)), SOARM_JOINTS)
+    viz = RerunViz(model="so100", save=str(tmp_path / "s.rrd"))
+    viz.start(servos)
+
+    for name in SOARM_JOINTS:
+        paths = viz._servo_paths[name]
+        assert len(paths) == 1, f"{name} should map to exactly one motor mesh"
+        assert paths[0].endswith("/visual_1")
+
+    # every servo distinct — no two joints colouring the same mesh
+    chosen = [p for paths in viz._servo_paths.values() for p in paths]
+    assert len(set(chosen)) == len(chosen)
+
+
+@pytest.mark.skipif(
+    not (cache_dir() / "so100" / "so100.urdf").exists(),
+    reason="3D assets not cached; run once with --viz to download",
+)
+def test_servos_light_up_one_at_a_time(tmp_path):
+    from soarm_doctor.viz import RerunViz
+
+    servos = make_servos(list(range(1, 7)), SOARM_JOINTS)
+    viz = RerunViz(model="so100", save=str(tmp_path / "s.rrd"))
+    viz.start(servos)
+    assert set(viz._last_status.values()) == {"unchecked"}
+
+    target = servos[2]
+    viz.mark_checking(target)
+    assert viz._last_status[target.name] == "checking"
+    assert viz._last_status[servos[3].name] == "unchecked"  # later ones untouched
+
+    target.pings_total = target.pings_ok = 20
+    viz.mark_checked(target)
+    assert viz._last_status[target.name] == "ok"
+
+    bad = servos[4]
+    bad.pings_total = 20
+    viz.mark_checked(bad)  # never answered
+    assert viz._last_status[bad.name] == "bad"
 
 
 # --- live position tracking (regression: the pose used to be driven by the

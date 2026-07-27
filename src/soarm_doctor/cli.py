@@ -17,7 +17,6 @@ from .checks import (
     DEFAULT_MODEL,
     build_report,
     make_servos,
-    read_all_telemetry,
     resolve_profile,
     run_motion_check,
     run_ping_check,
@@ -74,19 +73,43 @@ def heading(text: str) -> None:
 
 
 # --- stage rendering --------------------------------------------------------
-def render_ping_results(servos: list[ServoResult], rounds: int) -> None:
-    for servo in servos:
-        mark = green("ok") if servo.stable else red("!!")
-        telemetry = []
-        if servo.voltage is not None:
-            telemetry.append(f"{servo.voltage:4.1f}V")
-        if servo.temperature is not None:
-            telemetry.append(f"{servo.temperature:3d}C")
-        faults = ("  " + red("/".join(servo.errors))) if servo.errors else ""
-        print(
-            f"    servo {servo.servo_id} {servo.name:<14} "
-            f"{servo.pings_ok:2d}/{rounds:<2d} {mark}  {'  '.join(telemetry):<12}{faults}"
-        )
+def servo_line_prefix(servo: ServoResult) -> str:
+    return f"    servo {servo.servo_id} {servo.name:<14} "
+
+
+def announce_servo(servo: ServoResult) -> None:
+    """Show which servo is being tested right now.
+
+    Skipped entirely when output isn't a terminal: the line only exists to be
+    overwritten by the verdict, and piped output shouldn't carry escape codes.
+    """
+    if not sys.stdout.isatty():
+        return
+    print(f"{servo_line_prefix(servo)}{dim('checking...')}", end="", flush=True)
+
+
+def report_servo(servo: ServoResult) -> None:
+    """Overwrite the 'checking...' line with this servo's result."""
+    telemetry = []
+    if servo.voltage is not None:
+        telemetry.append(f"{servo.voltage:4.1f}V")
+    if servo.temperature is not None:
+        telemetry.append(f"{servo.temperature:3d}C")
+    readings = "  ".join(telemetry)
+
+    if not servo.responded:
+        outcome = red(f"{CROSS} no response")
+    elif servo.errors:
+        outcome = red(f"{CROSS} FAIL — {'/'.join(servo.errors)}")
+    elif not servo.stable:
+        outcome = yellow(f"! flaky {servo.pings_ok}/{servo.pings_total}")
+    else:
+        outcome = green(f"{TICK} good!")
+
+    # \r + clear-line replaces the "checking..." line in place on a terminal;
+    # piped output never had that line, so it starts clean.
+    prefix = "\r\033[2K" if sys.stdout.isatty() else ""
+    print(f"{prefix}{servo_line_prefix(servo)}{outcome:<28} {dim(readings)}".rstrip(), flush=True)
 
 
 class LiveTable:
@@ -288,6 +311,12 @@ def main(argv: list[str] | None = None) -> int:
     servos = make_servos(servo_ids, joint_names)
     report = build_report(selected.device, args.model, selected.serial_id, servos)
 
+    # The 3D view comes up here, before anything is tested, so the arm is on
+    # screen with every servo grey and lights up as the checks run.
+    viz = None
+    if args.viz or args.viz_spawn or args.viz_save:
+        viz = _start_viz(args, servos)
+
     bus = ServoBus(selected.device, args.baudrate)
     try:
         bus.open()
@@ -297,29 +326,37 @@ def main(argv: list[str] | None = None) -> int:
         return render_verdict(report)
 
     try:
-        # ---- [2/3] servos + power ----
-        print(f"\n{bold('[2/3] SERVOS + POWER')}  ({args.pings} pings)")
-        run_ping_check(bus, servos, rounds=args.pings)
-        read_all_telemetry(bus, servos)
-        render_ping_results(servos, args.pings)
+        # ---- [2/3] servos, one at a time ----
+        print(f"\n{bold('[2/3] SERVOS + POWER')}  {dim(f'({args.pings} pings each, in order)')}")
 
-        stable_rounds = min((s.pings_ok for s in servos), default=0)
-        print(f"  all {len(servos)} answering: {stable_rounds}/{args.pings} rounds")
+        def servo_started(servo: ServoResult) -> None:
+            announce_servo(servo)
+            if viz is not None:
+                viz.mark_checking(servo)
+
+        def servo_finished(servo: ServoResult) -> None:
+            report_servo(servo)
+            if viz is not None:
+                viz.mark_checked(servo)
+
+        run_ping_check(
+            bus,
+            servos,
+            rounds=args.pings,
+            on_servo_start=servo_started,
+            on_servo_done=servo_finished,
+        )
 
         if not report.any_responded:
             return render_verdict(report)
         if report.all_stable and not report.servos_with_errors:
-            print(f"  {green(TICK)} all {len(servos)} servos stable at rest.")
+            print(f"  {green(TICK)} all {len(servos)} servos responding and stable.")
 
         # ---- [3/3] motion ----
         if args.quick:
             print(f"\n{dim('[3/3] MOTION — skipped (--quick)')}")
         else:
             print(f"\n{bold('[3/3] MOTION')} — data integrity while the arm moves")
-
-            viz = None
-            if args.viz or args.viz_spawn or args.viz_save:
-                viz = _start_viz(args, servos)
 
             try:
                 input(f"    {dim('>> press ENTER, then sweep every joint and the gripper. Ctrl-C when done...')}")

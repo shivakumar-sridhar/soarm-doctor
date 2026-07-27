@@ -47,32 +47,62 @@ def make_servos(ids: list[int], names: list[str]) -> list[ServoResult]:
     return [ServoResult(servo_id=i, name=n) for i, n in zip(ids, names, strict=True)]
 
 
-def run_ping_check(bus: ServoBus, servos: list[ServoResult], rounds: int = 20, interval: float = 0.25) -> None:
-    """Stage 2 — ping every servo `rounds` times and record how often it answers.
+def check_servo(bus: ServoBus, servo: ServoResult, rounds: int = 20, interval: float = 0.1) -> ServoResult:
+    """Stage 2, for a single servo: ping it repeatedly, then read its telemetry.
 
-    Two different numbers come out of this and the distinction is the whole
-    diagnosis: per-servo hit counts, and how many rounds had *every* servo
-    answering. All-zero means unpowered; partial means the supply sags or a
-    connector is loose.
+    Pinging one servo many times over a couple of seconds is what separates
+    "unpowered" (never answers) from "under-powered or loose" (answers, but not
+    every time). The telemetry read then turns that inference into a cause: a
+    servo browning out reports its own voltage.
+    """
+    servo.pings_total = rounds
+    for index in range(rounds):
+        ok, error = bus.ping(servo.servo_id)
+        if ok:
+            servo.pings_ok += 1
+        servo.error_bits |= error
+        if index < rounds - 1:
+            time.sleep(interval)
+
+    if servo.responded:
+        telemetry = bus.read_telemetry(servo.servo_id)
+        servo.error_bits |= telemetry.error_bits
+        if telemetry.voltage is not None:
+            servo.voltage = telemetry.voltage
+        if telemetry.temperature is not None:
+            servo.temperature = telemetry.temperature
+    return servo
+
+
+def run_ping_check(
+    bus: ServoBus,
+    servos: list[ServoResult],
+    rounds: int = 20,
+    interval: float = 0.1,
+    on_servo_start: Callable[[ServoResult], None] | None = None,
+    on_servo_done: Callable[[ServoResult], None] | None = None,
+) -> None:
+    """Stage 2 — check the servos one at a time, in order.
+
+    Sequential rather than round-robin so each servo gets a verdict the moment
+    it's been tested, which the CLI prints and the 3D view lights up. The
+    electrical picture is the same either way: at rest with torque disabled,
+    every servo draws its idle current continuously regardless of which one is
+    being addressed.
     """
     for servo in servos:
-        servo.pings_total = rounds
-
-    for round_index in range(rounds):
-        for servo in servos:
-            ok, error = bus.ping(servo.servo_id)
-            if ok:
-                servo.pings_ok += 1
-            servo.error_bits |= error
-        if round_index < rounds - 1:
-            time.sleep(interval)
+        if on_servo_start is not None:
+            on_servo_start(servo)
+        check_servo(bus, servo, rounds=rounds, interval=interval)
+        if on_servo_done is not None:
+            on_servo_done(servo)
 
 
 def read_all_telemetry(bus: ServoBus, servos: list[ServoResult]) -> None:
     """Ask each responding servo for its own voltage and temperature.
 
-    This is the difference between "flaky, maybe power?" and "servo 2 is seeing
-    9.1 V". Servos that never answered are skipped — there's nothing to ask.
+    :func:`check_servo` already does this per servo; this remains for callers
+    driving the stages by hand. Servos that never answered are skipped.
     """
     for servo in servos:
         if not servo.responded:
