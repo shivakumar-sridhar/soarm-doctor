@@ -13,7 +13,7 @@ $ soarm-doctor
 ================================================================
 
 [1/3] USB DETECTION
-  • /dev/ttyACM0  serial 5B14115162  CH340/CH341
+  • /dev/ttyACM0  serial A1B2C3D4E5  CH340/CH341
   ✓ testing /dev/ttyACM0
 
 [2/3] SERVOS + POWER  (20 pings)
