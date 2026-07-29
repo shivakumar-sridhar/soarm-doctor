@@ -1,5 +1,17 @@
 # Screenshots for the README
 
+## In use
+
+| File | Where |
+|---|---|
+| `titleleft.jpeg` | Top of the README, left — the real arm on a bench. |
+| `titleright.png` | Top of the README, right — the same arm in the 3D view, one servo red. |
+
+The pair is a two-column HTML table, so keep replacements at roughly the same
+aspect ratio or one column will tower over the other.
+
+## Still open
+
 Three slots, each marked in `README.md` by an `IMAGE PLACEHOLDER` comment. Drop
 the file here under the name below, then delete the two comment markers around it
 so the `![...]` line renders.

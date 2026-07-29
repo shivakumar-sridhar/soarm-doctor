@@ -3,6 +3,17 @@
 **Health check for SO-100 / SO-101 robot arms.** Finds the bad servo, cable or
 power supply — and tells you which one to go touch.
 
+<table>
+<tr>
+<td width="50%"><img src="docs/images/titleleft.jpeg" alt="An SO-101 arm on a bench" width="100%"></td>
+<td width="50%"><img src="docs/images/titleright.png" alt="The same arm in the 3D view — five servos green, one red" width="100%"></td>
+</tr>
+<tr>
+<td align="center"><em>the arm on your bench</em></td>
+<td align="center"><em>…and which servo is the problem</em></td>
+</tr>
+</table>
+
 Run it before teleoperating or recording a dataset. When an arm misbehaves, the
 usual advice is "check your cables"; this tells you *which* cable.
 
