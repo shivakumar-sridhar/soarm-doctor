@@ -14,8 +14,11 @@ power supply — and tells you which one to go touch.
 </tr>
 </table>
 
-Run it before teleoperating or recording a dataset. When an arm misbehaves, the
-usual advice is "check your cables"; this tells you *which* cable.
+Run it before you teleoperate or record a dataset.
+
+When an arm misbehaves, the usual advice is *"check your cables."*
+
+**This tells you which cable.**
 
 ```
 $ soarm
