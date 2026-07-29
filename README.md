@@ -70,26 +70,47 @@ $ soarm
 
 ## Install
 
+Straight from this repo — one line, and you get the `soarm` command:
+
 ```bash
-pip install soarm-doctor          # the checker
-pip install 'soarm-doctor[viz]'   # + the live 3D view
+pip install "soarm-doctor[viz] @ git+https://github.com/shivakumar-sridhar/soarm-doctor"
 ```
 
-Python 3.10+. Linux, macOS and Windows.
+`[viz]` pulls in the live 3D view. Drop it for the terminal check alone:
+
+```bash
+pip install "soarm-doctor @ git+https://github.com/shivakumar-sridhar/soarm-doctor"
+```
+
+Python 3.10+. Linux, macOS and Windows. Needs `git` on your PATH.
 
 <details>
-<summary>From source</summary>
+<summary>Into a virtualenv (recommended)</summary>
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install "soarm-doctor[viz] @ git+https://github.com/shivakumar-sridhar/soarm-doctor"
+```
+
+Activate the venv in every new terminal before running `soarm`.
+</details>
+
+<details>
+<summary>To hack on it</summary>
 
 ```bash
 git clone https://github.com/shivakumar-sridhar/soarm-doctor
 cd soarm-doctor
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -e '.[viz,dev]'
+pytest
 ```
-
-Activate the venv in every new terminal before running `soarm`.
 </details>
+
+To upgrade later, add `--force-reinstall` to the same command — pip sees the
+same version number and otherwise skips the install.
 
 ---
 
@@ -293,11 +314,11 @@ leave low. Everything reads stable, and nothing can move.
 ## The 3D view
 
 ```bash
-pip install 'soarm-doctor[viz]'
 soarm --viz
 ```
 
-The arm appears as soon as the USB port is found, **body ghosted and the six
+Needs the `[viz]` extra from [Install](#install). The arm appears as soon as the
+USB port is found, **body ghosted and the six
 servos solid**, so the picture carries exactly one message: which motor is
 healthy and which isn't.
 

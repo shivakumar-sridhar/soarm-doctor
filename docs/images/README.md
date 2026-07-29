@@ -11,10 +11,10 @@ The pair is a two-column HTML table, so keep replacements at roughly the same
 aspect ratio or one column will tower over the other.
 
 The README links these by **absolute** `raw.githubusercontent.com` URL, not by
-relative path. PyPI renders the same README on the project page but does not
-resolve relative links, so a relative path shows a broken image to everyone
-arriving from `pip`. Keep new images absolute for the same reason — and note the
-URLs pin `main`, so an image only appears once it is pushed.
+relative path, so the page also renders anywhere that doesn't resolve relative
+links — a PyPI project page, a package index, a docs mirror. Keep new images
+absolute for the same reason. The URLs pin `main`, so an image only appears once
+it is pushed.
 
 ## Still open
 
