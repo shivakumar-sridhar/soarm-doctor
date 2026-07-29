@@ -70,8 +70,6 @@ $ soarm
 
 ## Install
 
-Copy all three lines. This is the one to use.
-
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
