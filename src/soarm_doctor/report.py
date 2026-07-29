@@ -118,7 +118,6 @@ class Report:
     """The whole run: what was tested, what happened, and the verdict."""
 
     port: str
-    model: str
     controller_serial: str | None = None
     servos: list[ServoResult] = field(default_factory=list)
 
@@ -332,7 +331,6 @@ class Report:
                 {"verdict": i.code, "summary": i.summary, "remedies": i.remedies} for i in self.secondary_issues()
             ],
             "port": self.port,
-            "model": self.model,
             "controller_serial": self.controller_serial,
             "motion_tested": self.motion_tested,
             "motion_seconds": round(self.motion_seconds, 1),

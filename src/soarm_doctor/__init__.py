@@ -10,7 +10,6 @@ __version__ = "0.6.0"
 
 from .bus import ServoBus, decode_error, list_serial_ports
 from .checks import (
-    ARM_PROFILES,
     read_all_telemetry,
     resolve_profile,
     run_motion_check,
@@ -19,7 +18,6 @@ from .checks import (
 from .report import Report, ServoResult, Verdict
 
 __all__ = [
-    "ARM_PROFILES",
     "Report",
     "ServoBus",
     "ServoResult",

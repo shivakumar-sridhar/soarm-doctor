@@ -32,13 +32,10 @@ SOARM_JOINTS = [
     "gripper",
 ]
 
-#: SO-100 and SO-101 use identical STS3215 servos on IDs 1-6, so one profile
-#: covers both. Kept as a table for the variants that don't.
-ARM_PROFILES: dict[str, dict[str, object]] = {
-    "so101": {"ids": [1, 2, 3, 4, 5, 6], "names": SOARM_JOINTS},
-    "so100": {"ids": [1, 2, 3, 4, 5, 6], "names": SOARM_JOINTS},
-}
-DEFAULT_MODEL = "so101"
+#: SO-100 and SO-101 alike: identical STS3215 servos at these ids on one
+#: 1 Mbaud bus. There is no arm-model choice to make, only `--ids` and
+#: `--names` for the other Feetech arms this happens to work on.
+SOARM_IDS = [1, 2, 3, 4, 5, 6]
 
 
 def make_servos(ids: list[int], names: list[str]) -> list[ServoResult]:
@@ -171,23 +168,21 @@ def run_motion_check(
 
 
 def resolve_profile(
-    model: str,
     ids: list[int] | None = None,
     names: list[str] | None = None,
 ) -> tuple[list[int], list[str]]:
-    """Servo ids and joint names for `model`, with optional overrides.
+    """The SO-ARM servo ids and joint names, with optional overrides.
 
     Overriding one without the other is allowed: extra ids get generic names,
     extra names are ignored.
     """
-    profile = ARM_PROFILES.get(model, ARM_PROFILES[DEFAULT_MODEL])
-    resolved_ids = list(ids) if ids else list(profile["ids"])  # type: ignore[arg-type]
-    resolved_names = list(names) if names else list(profile["names"])  # type: ignore[arg-type]
+    resolved_ids = list(ids) if ids else list(SOARM_IDS)
+    resolved_names = list(names) if names else list(SOARM_JOINTS)
 
     if len(resolved_names) < len(resolved_ids):
         resolved_names += [f"servo_{i}" for i in resolved_ids[len(resolved_names) :]]
     return resolved_ids, resolved_names[: len(resolved_ids)]
 
 
-def build_report(port: str, model: str, controller_serial: str | None, servos: list[ServoResult]) -> Report:
-    return Report(port=port, model=model, controller_serial=controller_serial, servos=servos)
+def build_report(port: str, controller_serial: str | None, servos: list[ServoResult]) -> Report:
+    return Report(port=port, controller_serial=controller_serial, servos=servos)

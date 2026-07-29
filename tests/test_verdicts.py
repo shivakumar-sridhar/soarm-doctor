@@ -26,7 +26,7 @@ def healthy_servos(pings: int = 20, span: int = 2000):
 
 
 def report_for(servos, **kwargs) -> Report:
-    report = Report(port="/dev/ttyACM0", model="so101", servos=servos, **kwargs)
+    report = Report(port="/dev/ttyACM0", servos=servos, **kwargs)
     return report
 
 
@@ -154,13 +154,16 @@ def test_json_round_trips():
 
 
 def test_profile_overrides_pad_missing_names():
-    ids, names = resolve_profile("so101", ids=[1, 2, 3, 7], names=["a", "b"])
+    ids, names = resolve_profile(ids=[1, 2, 3, 7], names=["a", "b"])
     assert ids == [1, 2, 3, 7]
     assert names == ["a", "b", "servo_3", "servo_7"]
 
 
-def test_so100_and_so101_share_a_profile():
-    assert resolve_profile("so100") == resolve_profile("so101")
+def test_the_default_profile_is_the_six_soarm_joints():
+    """SO-100 and SO-101 are the same six servos, so there is no model to pick."""
+    ids, names = resolve_profile()
+    assert ids == [1, 2, 3, 4, 5, 6]
+    assert names == SOARM_JOINTS
 
 
 def test_independent_faults_are_all_reported():

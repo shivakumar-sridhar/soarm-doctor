@@ -13,8 +13,6 @@ import sys
 from . import __version__
 from .bus import SerialPort, ServoBus, list_serial_ports
 from .checks import (
-    ARM_PROFILES,
-    DEFAULT_MODEL,
     build_report,
     make_servos,
     resolve_profile,
@@ -369,7 +367,6 @@ def build_parser() -> argparse.ArgumentParser:
         description="Health check for SO-100 / SO-101 arms: finds the bad servo, cable or supply.",
     )
     parser.add_argument("--port", help="serial port (auto-detected if omitted)")
-    parser.add_argument("--model", default=DEFAULT_MODEL, choices=sorted(ARM_PROFILES), help="arm model")
     parser.add_argument("--baudrate", type=int, default=1_000_000)
     parser.add_argument("--pings", type=int, default=20, help="ping rounds in the power check")
     parser.add_argument(
@@ -431,14 +428,13 @@ def _run(argv: list[str] | None = None) -> int:
     heading(f"soarm {__version__} — SO-100 / SO-101 health check")
 
     servo_ids, joint_names = resolve_profile(
-        args.model,
         [int(x) for x in args.ids.split(",")] if args.ids else None,
         args.names.split(",") if args.names else None,
     )
     servos = make_servos(servo_ids, joint_names)
 
-    # The view comes up before anything is tested — it depends only on the model,
-    # not on the port — so the viewer has the whole detection step to load.
+    # The view comes up before anything is tested — it depends only on the joint
+    # list, not on the port — so the viewer has the whole detection step to load.
     viz = None
     if args.viz or args.viz_web or args.viz_spawn or args.viz_save:
         print(f"\n{bold('3D VIEW')}")
@@ -477,7 +473,7 @@ def _run(argv: list[str] | None = None) -> int:
         selected = None
 
     if selected is None:
-        report = build_report("-", args.model, None, [])
+        report = build_report("-", None, [])
         # Several ports and no way to ask is a different problem from no arm at
         # all, and needs a different fix, so don't collapse them into one.
         if len(ports) > 1:
@@ -488,7 +484,7 @@ def _run(argv: list[str] | None = None) -> int:
 
     print(f"  {green(TICK)} testing {selected.device}")
 
-    report = build_report(selected.device, args.model, selected.serial_id, servos)
+    report = build_report(selected.device, selected.serial_id, servos)
     report.min_operating_voltage = args.min_voltage if args.min_voltage is not None else min_voltage_for(args.motors)
 
     bus = ServoBus(selected.device, args.baudrate)
