@@ -5,8 +5,8 @@ power supply — and tells you which one to go touch.
 
 <table>
 <tr>
-<td width="50%"><img src="docs/images/titleleft.jpeg" alt="An SO-101 arm on a bench" width="100%"></td>
-<td width="50%"><img src="docs/images/titleright.png" alt="The same arm in the 3D view — five servos green, one red" width="100%"></td>
+<td width="50%"><img src="https://raw.githubusercontent.com/shivakumar-sridhar/soarm-doctor/main/docs/images/titleleft.jpeg" alt="An SO-101 arm on a bench" width="100%"></td>
+<td width="50%"><img src="https://raw.githubusercontent.com/shivakumar-sridhar/soarm-doctor/main/docs/images/titleright.png" alt="The same arm in the 3D view — five servos green, one red" width="100%"></td>
 </tr>
 <tr>
 <td align="center"><em>the arm on your bench</em></td>
@@ -63,7 +63,7 @@ $ soarm
 <!-- IMAGE PLACEHOLDER — a clean pass in the terminal, all six servos green.
      Save it as docs/images/terminal-pass.png, then delete these comment
      markers so the line below renders:
-![All six servos passing](docs/images/terminal-pass.png)
+![All six servos passing](https://raw.githubusercontent.com/shivakumar-sridhar/soarm-doctor/main/docs/images/terminal-pass.png)
 -->
 
 ---
@@ -154,7 +154,7 @@ matching the terminal line for line.
 <!-- IMAGE PLACEHOLDER — the 3D view after stage 2, all six servos green.
      Save it as docs/images/viz-all-green.png, then delete these comment
      markers so the line below renders:
-![Stage 2 complete — all six servos green](docs/images/viz-all-green.png)
+![Stage 2 complete — all six servos green](https://raw.githubusercontent.com/shivakumar-sridhar/soarm-doctor/main/docs/images/viz-all-green.png)
 -->
 
 ### 3 · You sweep the arm, it watches the data
@@ -179,7 +179,7 @@ the encoder reads, the direction and the range in a single glance.
 <!-- IMAGE PLACEHOLDER — the 3D view mid-sweep, tracking the real arm.
      Save it as docs/images/viz-motion-sweep.png, then delete these comment
      markers so the line below renders:
-![Stage 3 — the view tracks the arm as you sweep it](docs/images/viz-motion-sweep.png)
+![Stage 3 — the view tracks the arm as you sweep it](https://raw.githubusercontent.com/shivakumar-sridhar/soarm-doctor/main/docs/images/viz-motion-sweep.png)
 -->
 
 ### Then the verdict

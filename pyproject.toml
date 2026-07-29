@@ -57,6 +57,12 @@ Issues = "https://github.com/shivakumar-sridhar/soarm-doctor/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/soarm_doctor"]
 
+# The README's screenshots are served from GitHub by absolute URL, so shipping
+# them would put ~800 kB of PNG in every sdist for nothing. .claude/ is one
+# machine's tool permissions and has no business in a public artifact.
+[tool.hatch.build.targets.sdist]
+exclude = ["docs/", ".claude/", "dist/"]
+
 [tool.ruff]
 line-length = 119
 src = ["src", "tests"]
