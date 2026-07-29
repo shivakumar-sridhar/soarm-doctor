@@ -49,6 +49,28 @@ def test_no_port_is_a_connection_error_not_a_failure():
     assert report.verdict().exit_code == EXIT_NO_CONNECTION
 
 
+def test_two_arms_are_not_guessed_between():
+    """A teleop rig has two arms on the bench and they look alike to autodetect.
+
+    Picking one is how you end up diagnosing the arm that was fine, so a run
+    that couldn't ask says so and names both, rather than choosing.
+    """
+    report = report_for([])
+    report.ambiguous_ports = ["/dev/ttyACM0", "/dev/ttyACM1"]
+    verdict = report.verdict()
+    assert verdict.code == "MANY_PORTS"
+    assert verdict.exit_code == EXIT_NO_CONNECTION
+    assert verdict.remedies == ["soarm --port /dev/ttyACM0", "soarm --port /dev/ttyACM1"]
+
+
+def test_ambiguity_is_not_reported_as_a_missing_port():
+    """Different problem, different fix — the remedies must not be swapped."""
+    report = report_for([])
+    report.port_found = False
+    report.ambiguous_ports = ["/dev/ttyACM0", "/dev/ttyACM1"]
+    assert report.verdict().code == "MANY_PORTS"
+
+
 def test_unopenable_port_is_a_connection_error():
     report = report_for(healthy_servos(), connected=False, connection_error="permission denied")
     verdict = report.verdict()
@@ -189,9 +211,9 @@ def at_voltage(volts: float):
     return servos
 
 
-def report_at(volts: float, motors: str = "12v", leader: bool = False) -> Report:
+def report_at(volts: float, motors: str = "12v") -> Report:
     report = report_for(at_voltage(volts), motion_tested=True)
-    report.min_operating_voltage = min_voltage_for(motors, leader)
+    report.min_operating_voltage = min_voltage_for(motors)
     return report
 
 
@@ -203,11 +225,9 @@ def test_unpowered_12v_arm_does_not_pass():
     assert "5.4V" in verdict.summary
 
 
-def test_the_failure_explains_both_escape_hatches():
-    """A legitimate 7.4V or leader arm must be told how to say so."""
+def test_the_failure_tells_a_74v_arm_how_to_say_so():
     remedies = " ".join(report_at(5.4).verdict().remedies)
     assert "--motors 7.4v" in remedies
-    assert "--leader" in remedies
 
 
 def test_normal_12v_arm_is_unaffected():
@@ -224,18 +244,16 @@ def test_a_12v_arm_at_the_same_voltage_still_fails():
     assert report_at(5.4, motors="12v").verdict().code == "UNDER_VOLTAGE"
 
 
-def test_a_leader_arm_needs_no_drive_voltage():
-    """Backdriven by hand with torque off; it only has to power its encoders."""
-    assert report_at(5.4, leader=True).verdict().code == "PASS"
-    assert report_at(4.5, leader=True).verdict().code == "PASS"
+def test_the_variant_is_the_only_thing_that_moves_the_floor():
+    """How the arm is used — leader, follower — has no bearing on it.
 
-
-def test_a_leader_with_dying_encoders_still_fails():
-    assert report_at(3.2, leader=True).verdict().code == "UNDER_VOLTAGE"
-
-
-def test_leader_overrides_the_motor_variant():
-    assert report_at(5.0, motors="12v", leader=True).verdict().code == "PASS"
+    A servo either has the voltage to turn or it doesn't, and that threshold
+    belongs to the motor.
+    """
+    assert min_voltage_for("7.4v") == 4.8
+    assert min_voltage_for("12v") == 9.0
+    assert report_at(5.4, motors="7.4v").verdict().code == "PASS"
+    assert report_at(5.4, motors="12v").verdict().code == "UNDER_VOLTAGE"
 
 
 def test_a_74v_arm_below_its_own_spec_fails():

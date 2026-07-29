@@ -36,20 +36,17 @@ MOTOR_VARIANTS = {
 }
 DEFAULT_MOTOR_VARIANT = "12v"
 
-#: A leader arm is backdriven by hand with torque disabled, so drive voltage is
-#: irrelevant to it — it only has to keep its encoders powered and talking.
-#: Checking it against a follower's floor is meaningless and fails good arms.
-LEADER_MIN_VOLTAGE = 4.0
-
-#: Kept as the module-level default for callers that don't care about variant
-#: or role. Equivalent to a stock 12 V follower.
+#: Module-level default for callers that don't name a variant.
 MIN_OPERATING_VOLTAGE = MOTOR_VARIANTS[DEFAULT_MOTOR_VARIANT]
 
 
-def min_voltage_for(motors: str = DEFAULT_MOTOR_VARIANT, leader: bool = False) -> float:
-    """Voltage floor for this arm, given what it actually has to do."""
-    if leader:
-        return LEADER_MIN_VOLTAGE
+def min_voltage_for(motors: str = DEFAULT_MOTOR_VARIANT) -> float:
+    """Voltage floor for this arm.
+
+    The variant is the whole answer: a servo either has enough voltage to turn
+    or it doesn't, and that threshold is a property of the motor, not of how you
+    happen to be using the arm today.
+    """
     return MOTOR_VARIANTS.get(motors, MIN_OPERATING_VOLTAGE)
 
 
@@ -131,6 +128,9 @@ class Report:
     motion_seconds: float = 0.0
     connection_error: str | None = None
     min_operating_voltage: float = MIN_OPERATING_VOLTAGE
+    #: Devices found when more than one port was plugged in and nobody could be
+    #: asked which to use. Empty on every other run.
+    ambiguous_ports: list[str] = field(default_factory=list)
 
     # ---- aggregate views -------------------------------------------------
     @property
@@ -199,6 +199,15 @@ class Report:
         """
         # Connection-level faults are terminal: nothing further was measured, so
         # there is nothing else meaningful to report alongside them.
+        if self.ambiguous_ports:
+            return [
+                Verdict(
+                    "MANY_PORTS",
+                    EXIT_NO_CONNECTION,
+                    f"{len(self.ambiguous_ports)} serial ports found — say which arm to test",
+                    [f"soarm --port {device}" for device in self.ambiguous_ports],
+                )
+            ]
         if not self.port_found:
             return [
                 Verdict(
@@ -267,8 +276,6 @@ class Report:
                         "If the supply should be on: it isn't. The board runs off USB, so the servos "
                         "answer at this voltage but cannot turn. Connect it and re-run.",
                         "If this arm has 7.4V motors, pass --motors 7.4v.",
-                        "If you use it as a leader (backdriven by hand, torque off), pass --leader — "
-                        "drive voltage doesn't apply.",
                     ],
                 )
             )

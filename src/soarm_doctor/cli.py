@@ -11,7 +11,7 @@ import os
 import sys
 
 from . import __version__
-from .bus import SerialPort, ServoBus, autodetect_port, list_serial_ports
+from .bus import SerialPort, ServoBus, list_serial_ports
 from .checks import (
     ARM_PROFILES,
     DEFAULT_MODEL,
@@ -32,6 +32,10 @@ from .report import (
     ServoResult,
     min_voltage_for,
 )
+
+# Safe at module level despite the lazy `RerunViz` import below: viz.py itself
+# needs nothing beyond the standard library, only its methods reach for rerun.
+from .viz import WINDOW_SIZE
 
 WIDTH = 64
 
@@ -202,16 +206,53 @@ def render_verdict(report: Report) -> int:
     return verdict.exit_code
 
 
+# --- 3D view ----------------------------------------------------------------
+def window_size(text: str) -> tuple[int, int] | None:
+    """Parse ``WxH``. ``None`` — from ``max`` — means the browser's own size."""
+    if text.strip().lower() in {"max", "full"}:
+        return None
+    try:
+        width, height = (int(part) for part in text.lower().split("x"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected WxH like 1280x900, or 'max' — got {text!r}") from None
+    if width < 480 or height < 360:
+        raise argparse.ArgumentTypeError(f"{text} is too small to show the arm and its panel")
+    return (width, height)
+
+
 # --- port selection ---------------------------------------------------------
-def choose_port(requested: str | None) -> SerialPort | None:
-    if requested:
-        for port in list_serial_ports():
-            if port.device == requested:
-                return port
-        # Not enumerated (a symlink, or a platform pyserial can't introspect) —
-        # trust the operator and try to open it anyway.
-        return SerialPort(device=requested, serial_id=None, description="", vid=None)
-    return autodetect_port()
+def named_port(requested: str) -> SerialPort:
+    for port in list_serial_ports():
+        if port.device == requested:
+            return port
+    # Not enumerated (a symlink, or a platform pyserial can't introspect) —
+    # trust the operator and try to open it anyway.
+    return SerialPort(device=requested, serial_id=None, description="", vid=None)
+
+
+def prompt_for_port(ports: list[SerialPort]) -> SerialPort | None:
+    """Ask which arm to test. ``None`` if there's nobody to ask.
+
+    Two arms on the bench is the normal case for a teleop rig, and the two look
+    alike to autodetect — so picking one and hoping is how you end up debugging
+    the arm that was fine. Ask instead.
+    """
+    if not sys.stdin.isatty():
+        return None
+    print(f"  {yellow('note')}: {len(ports)} ports found — which one is the arm to test?")
+    for index, port in enumerate(ports, 1):
+        print(f"    {index}) {port.label}")
+    while True:
+        try:
+            answer = input(f"    {dim('>> number, or Enter for 1: ')}").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if not answer:
+            return ports[0]
+        if answer.isdigit() and 1 <= int(answer) <= len(ports):
+            return ports[int(answer) - 1]
+        print(f"    {dim(f'pick a number between 1 and {len(ports)}')}")
 
 
 def _hidden_port_note() -> str | None:
@@ -251,12 +292,15 @@ def _start_viz(args: argparse.Namespace, servos: list[ServoResult]):
 
     try:
         viz = RerunViz(
-            model=args.model,
-            spawn=args.viz_spawn,
+            # Desktop unless a browser was asked for: it's sized on every
+            # platform, needs one port rather than two, and doesn't depend on
+            # which browser happens to be installed.
+            spawn=not args.viz_web,
             save=args.viz_save,
             web_port=args.viz_port,
             grpc_port=args.viz_port + 786,
             open_browser=not args.viz_no_open,
+            window_size=args.viz_window,
         )
         viz.start(servos)
     except VizUnavailable as exc:
@@ -269,6 +313,11 @@ def _start_viz(args: argparse.Namespace, servos: list[ServoResult]):
     if viz.url:
         opened = "opening in your browser" if viz.open_browser else "open this"
         print(f"  {green('3D view')} ({opened}): {viz.url}")
+        if viz.moved_ports:
+            print(f"  {dim(f'port {args.viz_port} was busy (another viewer still open) — using {viz.web_port}')}")
+        if viz.open_browser and args.viz_window and not viz.sized_window:
+            # Say so, or the window opens full-screen and the flag looks broken.
+            print(f"  {dim('no Chrome/Chromium to size the window with — opened at your browser default')}")
     elif args.viz_save:
         print(f"  {green('3D view')}: recording to {args.viz_save}")
     return viz
@@ -289,10 +338,34 @@ def wait_for_viewer(viz) -> None:
         print()
 
 
+def hold_viewer(viz) -> None:
+    """Keep the web view alive until the operator has finished looking at it.
+
+    The viewer is served *by this process*, so returning from the run tears the
+    server down — and the verdict, written milliseconds earlier, is precisely
+    what never makes it across. Beyond delivery, the finished view is the part
+    worth studying: which joints went red, how far each one swept.
+
+    Only for the served view. ``--viz-save`` writes a file and ``--viz-spawn``
+    hands off to a viewer that outlives us, so neither needs holding.
+    """
+    if viz is None or viz.url is None or not sys.stdin.isatty():
+        return
+    # Promise closing only when we opened the window and can therefore shut it.
+    # A page in the operator's own browser is theirs to close, so say what will
+    # really happen: the feed stops, the tab stays.
+    prompt = "press ENTER to close it" if viz.sized_window else "press ENTER to stop serving it"
+    try:
+        input(f"\n    {dim(f'>> 3D view is still live — {prompt}...')}")
+    except (EOFError, KeyboardInterrupt):
+        print()
+    viz.close()
+
+
 # --- main -------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="soarm-doctor",
+        prog="soarm",
         description="Health check for SO-100 / SO-101 arms: finds the bad servo, cable or supply.",
     )
     parser.add_argument("--port", help="serial port (auto-detected if omitted)")
@@ -306,15 +379,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"servo voltage variant (default {DEFAULT_MOTOR_VARIANT})",
     )
     parser.add_argument(
-        "--leader",
-        action="store_true",
-        help="arm is backdriven by hand with torque off — skip the drive-voltage requirement",
-    )
-    parser.add_argument(
         "--min-voltage",
         type=float,
         default=None,
-        help="explicit voltage floor, overriding --motors / --leader",
+        help="explicit voltage floor, overriding --motors",
     )
     parser.add_argument("--quick", action="store_true", help="stages 1-2 only; no operator needed")
     parser.add_argument("--json", metavar="PATH", help="write the full report as JSON ('-' for stdout)")
@@ -322,12 +390,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ids", help="comma-separated servo ids (default 1,2,3,4,5,6)")
     parser.add_argument("--names", help="comma-separated joint names, matched to --ids")
     viz = parser.add_argument_group("3D view (needs the viz extra)")
-    viz.add_argument("--viz", action="store_true", help="live 3D arm, opened in your browser")
-    viz.add_argument("--viz-spawn", action="store_true", help="desktop Rerun viewer instead of a browser")
+    viz.add_argument("--viz", action="store_true", help="live 3D arm in a desktop window")
+    viz.add_argument("--viz-web", action="store_true", help="use a browser instead — viewable over an SSH tunnel")
+    # The desktop viewer is now what --viz gives you, so this asks for the
+    # default. Kept because it's in people's shell history and scripts.
+    viz.add_argument("--viz-spawn", action="store_true", help=argparse.SUPPRESS)
     viz.add_argument("--viz-save", metavar="PATH", help="record the session to a .rrd file to attach to a bug report")
     viz.add_argument("--viz-port", type=int, default=9090, help="web viewer port (default 9090)")
     viz.add_argument("--viz-no-open", action="store_true", help="print the URL instead of opening a browser")
-    parser.add_argument("--version", action="version", version=f"soarm-doctor {__version__}")
+    viz.add_argument(
+        "--viz-window",
+        metavar="WxH",
+        type=window_size,
+        default=WINDOW_SIZE,
+        help=f"window size for either viewer, or 'max' (default {WINDOW_SIZE[0]}x{WINDOW_SIZE[1]})",
+    )
+    parser.add_argument("--version", action="version", version=f"soarm {__version__}")
     return parser
 
 
@@ -350,7 +428,7 @@ def _run(argv: list[str] | None = None) -> int:
     if args.list_ports:
         return print_ports()
 
-    heading(f"soarm-doctor {__version__} — {args.model.upper()} health check")
+    heading(f"soarm {__version__} — SO-100 / SO-101 health check")
 
     servo_ids, joint_names = resolve_profile(
         args.model,
@@ -360,11 +438,24 @@ def _run(argv: list[str] | None = None) -> int:
     servos = make_servos(servo_ids, joint_names)
 
     # The view comes up before anything is tested — it depends only on the model,
-    # not on the port — so the browser has the whole detection step to load.
+    # not on the port — so the viewer has the whole detection step to load.
     viz = None
-    if args.viz or args.viz_spawn or args.viz_save:
+    if args.viz or args.viz_web or args.viz_spawn or args.viz_save:
         print(f"\n{bold('3D VIEW')}")
         viz = _start_viz(args, servos)
+
+    def finish(report: Report) -> int:
+        """Render the verdict everywhere the operator might be looking.
+
+        Every exit below goes through here, including the ones that give up
+        before a servo is ever reached — those are exactly the runs where
+        someone is watching the 3D view and would otherwise see only grey.
+        """
+        if viz is not None:
+            viz.show_verdict(report.verdict())
+        exit_code = render_verdict(report)
+        hold_viewer(viz)
+        return exit_code
 
     # ---- [1/3] detection ----
     print(f"\n{bold('[1/3] USB DETECTION')}")
@@ -376,20 +467,29 @@ def _run(argv: list[str] | None = None) -> int:
         if note:
             print(f"  {dim(note)}")
 
-    selected = choose_port(args.port)
+    if args.port:
+        selected = named_port(args.port)
+    elif len(ports) == 1:
+        selected = ports[0]
+    elif ports:
+        selected = prompt_for_port(ports)
+    else:
+        selected = None
+
     if selected is None:
         report = build_report("-", args.model, None, [])
-        report.port_found = False
-        return render_verdict(report)
+        # Several ports and no way to ask is a different problem from no arm at
+        # all, and needs a different fix, so don't collapse them into one.
+        if len(ports) > 1:
+            report.ambiguous_ports = [p.device for p in ports]
+        else:
+            report.port_found = False
+        return finish(report)
 
-    if not args.port and len(ports) > 1:
-        print(f"  {yellow('note')}: several ports found — testing {selected.device}. Use --port to pick another.")
     print(f"  {green(TICK)} testing {selected.device}")
 
     report = build_report(selected.device, args.model, selected.serial_id, servos)
-    report.min_operating_voltage = (
-        args.min_voltage if args.min_voltage is not None else min_voltage_for(args.motors, args.leader)
-    )
+    report.min_operating_voltage = args.min_voltage if args.min_voltage is not None else min_voltage_for(args.motors)
 
     bus = ServoBus(selected.device, args.baudrate)
     try:
@@ -397,16 +497,21 @@ def _run(argv: list[str] | None = None) -> int:
     except Exception as exc:
         report.connected = False
         report.connection_error = str(exc)
-        return render_verdict(report)
+        return finish(report)
 
     try:
         # ---- [2/3] servos, one at a time ----
-        role = "leader, backdriven" if args.leader else f"{args.motors} motors"
         print(
             f"\n{bold('[2/3] SERVOS + POWER')}  "
-            f"{dim(f'({args.pings} pings each · {role} · needs {report.min_operating_voltage:.1f}V)')}"
+            f"{dim(f'({args.pings} pings each · {args.motors} motors · needs {report.min_operating_voltage:.1f}V)')}"
         )
+        # Say what's being waited for *before* waiting: `wait_for_viewer` blocks
+        # on ENTER, and until this the panel still read "finding the port".
+        if viz is not None:
+            viz.stage_ready()
         wait_for_viewer(viz)
+        if viz is not None:
+            viz.stage_servos()
 
         def servo_started(servo: ServoResult) -> None:
             announce_servo(servo)
@@ -427,7 +532,7 @@ def _run(argv: list[str] | None = None) -> int:
         )
 
         if not report.any_responded:
-            return render_verdict(report)
+            return finish(report)
         if report.all_stable and not report.servos_with_errors and not report.servos_undervolt:
             print(f"  {green(TICK)} all {len(servos)} servos responding and stable.")
 
@@ -436,12 +541,19 @@ def _run(argv: list[str] | None = None) -> int:
             print(f"\n{dim('[3/3] MOTION — skipped (--quick)')}")
         else:
             print(f"\n{bold('[3/3] MOTION')} — data integrity while the arm moves")
+            # Stage 2's result plus "press ENTER" — the sweep instructions only
+            # go up once the sweep is actually running, or the panel tells them
+            # to move the arm while the run is still waiting on a keypress.
+            if viz is not None:
+                viz.servos_checked(servos)
 
             try:
                 input(f"    {dim('>> press ENTER, then sweep every joint and the gripper. Ctrl-C when done...')}")
             except (EOFError, KeyboardInterrupt):
                 print()
-                return render_verdict(report)
+                return finish(report)
+            if viz is not None:
+                viz.stage_motion()
             print()
             table = LiveTable()
 
@@ -457,7 +569,7 @@ def _run(argv: list[str] | None = None) -> int:
     finally:
         bus.close()
 
-    exit_code = render_verdict(report)
+    exit_code = finish(report)
 
     if args.json:
         if args.json == "-":

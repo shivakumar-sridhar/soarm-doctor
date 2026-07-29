@@ -7,9 +7,9 @@ Run it before teleoperating or recording a dataset. When an arm misbehaves, the
 usual advice is "check your cables"; this tells you *which* cable.
 
 ```
-$ soarm-doctor
+$ soarm
 ================================================================
-  soarm-doctor — SO101 health check
+  soarm 0.6.0 — SO-100 / SO-101 health check
 ================================================================
 
 [1/3] USB DETECTION
@@ -55,18 +55,22 @@ pip install soarm-doctor
 ## Use
 
 ```bash
-soarm-doctor                      # full three-stage check
-soarm-doctor --quick              # stages 1-2 only; no human needed
-soarm-doctor --port /dev/ttyACM1 --model so100
-soarm-doctor --list-ports         # which port is my arm on?
-soarm-doctor --json report.json   # machine-readable, good for bug reports
+soarm                      # full three-stage check
+soarm --quick              # stages 1-2 only; no human needed
+soarm --port /dev/ttyACM1  # two arms plugged in? pick one
+soarm --list-ports         # which port is my arm on?
+soarm --json report.json   # machine-readable, good for bug reports
 ```
+
+With two arms plugged in it asks which one to test rather than guessing — a
+teleop rig has a leader and a follower on the bench, and diagnosing the wrong one
+wastes the trip. Pass `--port` to skip the question.
 
 Exit codes: **0** pass · **1** a real fault · **2** couldn't connect. So this
 works:
 
 ```bash
-soarm-doctor --quick && lerobot-record --robot.type=so101_follower ...
+soarm --quick && lerobot-record --robot.type=so101_follower ...
 ```
 
 ## What it checks
@@ -100,24 +104,22 @@ stock arms leave low. Everything reads stable, and nothing can move.
 
 ## Telling it what your arm is
 
-The voltage a servo needs depends on two things the tool can't detect, so say
-which you have. It defaults to a stock 12 V follower.
+One thing the tool can't detect: which motor variant you have. Say it if you're
+not on stock 12 V.
 
 ```bash
-soarm-doctor --motors 7.4v      # 7.4 V STS3215s (spec down to 4.8 V)
-soarm-doctor --leader           # backdriven by hand, torque off
-soarm-doctor --min-voltage 5.0  # explicit floor, overrides both
+soarm --motors 7.4v      # 7.4 V STS3215s (spec down to 4.8 V)
+soarm --min-voltage 5.0  # explicit floor, overrides the variant
 ```
 
-`--leader` matters more than it looks. A leader arm is moved by hand with torque
-disabled, so it never needs drive voltage at all — only enough to keep its
-encoders alive. Holding it to a follower's floor fails perfectly good arms.
+That's the whole configuration. Leader or follower makes no difference here — a
+servo either has the voltage to turn or it doesn't, and that threshold belongs
+to the motor, not to how you happen to be using the arm today.
 
-| Arm | Floor |
+| Motors | Floor |
 |---|---|
 | `--motors 12v` (default) | 9.0 V |
 | `--motors 7.4v` | 4.8 V |
-| `--leader` | 4.0 V — encoders only |
 
 The stage-2 header always shows which profile is in force, so a wrong assumption
 is visible before it becomes a confusing failure:
@@ -130,10 +132,11 @@ is visible before it becomes a confusing failure:
 
 | Verdict | Meaning | What to do |
 |---|---|---|
+| `MANY_PORTS` | Two arms plugged in, nobody to ask | Re-run in a terminal and pick one, or pass `--port`. |
 | `NO_PORT` | No serial port at all | Plug into the computer directly, not a hub. Try another cable — some are charge-only. |
 | `NO_CONNECTION` | Port exists, won't open | `sudo chmod 666 /dev/ttyACM0`, or close whatever else is holding it. |
 | `NO_POWER` | USB fine, no servo answers | The board runs off USB; the motors don't. Connect the power supply. |
-| `UNDER_VOLTAGE` | Servos answer, but too low to move | Supply off or disconnected. Or the arm is a 7.4 V variant or a leader — see below. |
+| `UNDER_VOLTAGE` | Servos answer, but too low to move | Supply off or disconnected. Or the arm is a 7.4 V variant — see below. |
 | `SERVO_ERROR` | A servo reports a fault itself | Read the flag: voltage / overheat / overload / overcurrent / angle. |
 | `FLAKY` | Servos drop in and out at rest | Usually an under-rated supply. 12 V 2 A is marginal; 12 V 5 A is reliable. Otherwise reseat connectors. |
 | `CORRUPT` | Garbage reads while moving | Replace the servo cable on the named joint. Reseating won't hold. |
@@ -148,11 +151,12 @@ configuration. Stage 3 asks *you* to move the arm by hand.
 
 ## Supported hardware
 
-SO-100 and SO-101 arms — leader or follower — using Feetech STS3215 servos on
-IDs 1–6 at 1 Mbaud. Other Feetech STS/SMS arms work with `--ids` and `--names`:
+**SO-100 and SO-101 alike.** They carry the same six Feetech STS3215 servos on
+the same 1 Mbaud bus at IDs 1–6, and the same six joint names — so every check
+here applies identically to both, and there is nothing to configure. Other Feetech STS/SMS arms work with `--ids` and `--names`:
 
 ```bash
-soarm-doctor --ids 1,2,3,4,5 --names pan,lift,elbow,wrist,grip
+soarm --ids 1,2,3,4,5 --names pan,lift,elbow,wrist,grip
 ```
 
 Linux, macOS and Windows.
@@ -187,12 +191,34 @@ print(report.verdict().summary)
 
 ```bash
 pip install 'soarm-doctor[viz]'
-soarm-doctor --model so100 --viz
+soarm --viz
 ```
 
-The arm appears in a browser tab as soon as the USB port is found, **body
-ghosted and the six servos solid**, so the picture carries exactly one message:
-which motor is healthy and which isn't.
+The arm appears as soon as the USB port is found, **body ghosted and the six
+servos solid**, so the picture carries exactly one message: which motor is
+healthy and which isn't.
+
+It opens in a **window beside your terminal, not over it** — stage 3 is a
+dialogue (press ENTER, sweep the arm, Ctrl-C when done), so a maximised viewer
+would bury the half you still have to drive.
+
+```bash
+soarm --viz --viz-window 1600x1000   # bigger
+soarm --viz --viz-window max         # Rerun's own default size
+```
+
+`--viz` is a **desktop window**. It's sized on every platform, needs one port
+rather than two, and doesn't care which browser you have installed.
+
+```bash
+soarm --viz-web    # same viewer in a browser — for a headless box over SSH
+```
+
+That's the one thing the desktop window can't do. `--viz-window` sizes it too,
+but only via Chrome, Chromium, Brave or Edge — Firefox removed the flags for it,
+so on a Firefox-only machine the page opens at your browser's own size and the
+terminal says so. `--viz-no-open` prints the URL if you'd rather place it
+yourself.
 
 Then the servos are checked **one at a time, in order**. Each lights up blue
 while it's being tested, then turns green or red — matching the terminal
@@ -222,18 +248,24 @@ the servo driving a joint lives in that joint's parent link — so "ghost the bo
 colour the servos" is an exact mapping onto the real motors, not an approximation.
 
 ```bash
-soarm-doctor --viz-spawn              # desktop viewer instead of a browser
-soarm-doctor --viz-save session.rrd   # record it, attach to a bug report
+soarm --viz-save session.rrd   # record it, attach to a bug report
 ```
 
-That last one is worth knowing about: `.rrd` recordings capture the whole
-session, so "my arm is doing something weird" can come with the actual data
-attached.
+`.rrd` recordings capture the whole session, so "my arm is doing something weird"
+can come with the actual data attached.
+
+The desktop window **outlives the run**, so there's no "press ENTER to close" —
+results stay up as long as you want, and the next run opens its own window rather
+than fighting over the first one's port. The browser view is served by `soarm`
+itself, so that one does close when the run ends.
 
 Built on [Rerun](https://rerun.io)'s built-in URDF loader, with the Apache-2.0
-arm models from [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100)
-(downloaded once on first use and cached, ~4 MB for the SO-100, ~16 MB for the
-SO-101 — they're not shipped in the wheel).
+arm model from [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100)
+(~4 MB, downloaded once on first use and cached — not shipped in the wheel).
+
+**The SO-100 model is drawn for both arms**, and the view says so. The two have
+the same six servos, joints, bus and frame; only the link shapes differ, and this
+is a servo health readout rather than a digital twin.
 
 **The 3D pose is approximate.** Ticks are mapped to radians about the servo's
 mid-point with no per-arm calibration, so a joint whose zero is offset renders

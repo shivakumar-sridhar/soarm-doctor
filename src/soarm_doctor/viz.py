@@ -25,9 +25,10 @@ from __future__ import annotations
 import os
 import shutil
 import urllib.request
+import webbrowser
 from pathlib import Path
 
-from .report import MIN_MEANINGFUL_SPAN, ServoResult
+from .report import MIN_MEANINGFUL_SPAN, ServoResult, Verdict
 
 
 class VizUnavailable(RuntimeError):
@@ -37,17 +38,26 @@ class VizUnavailable(RuntimeError):
     "install the extra" rather than surfacing an import error.
     """
 
+
 # --- assets -----------------------------------------------------------------
 # URDF + meshes come from TheRobotStudio/SO-ARM100 (Apache-2.0), pinned to a
 # commit so a future upstream change can't silently alter what users see.
 ASSET_REPO = "TheRobotStudio/SO-ARM100"
 ASSET_SHA = "fda892cba81032c46c40976a48c9ceadbf40a9ca"
-ASSET_SUBDIR = {"so100": "Simulation/SO100", "so101": "Simulation/SO101"}
-URDF_NAME = {"so100": "so100.urdf", "so101": "so101_new_calib.urdf"}
 
-# Downloaded on first use rather than shipped in the wheel: the meshes are
-# ~4 MB for the SO-100 and ~16 MB for the SO-101, and the core diagnostic must
-# stay installable and usable on a headless box with no interest in 3D.
+#: One model is rendered for both arms. They carry the same six STS3215 servos
+#: on the same bus, their URDFs use the same six joint names and the same frame
+#: and scale, and this view is a servo health readout — not a digital twin. The
+#: SO-101's own URDF buys nothing here and costs 4x the download and a second
+#: set of per-model mesh assumptions to keep straight. What differs is link
+#: shape, so the view says which model it is drawing (see VIEW_NOTE).
+ASSET_MODEL = "so100"
+ASSET_SUBDIR = "Simulation/SO100"
+URDF_NAME = "so100.urdf"
+
+# Downloaded on first use rather than shipped in the wheel: ~4 MB of meshes, and
+# the core diagnostic must stay installable and usable on a headless box with no
+# interest in 3D.
 _TREE_API = "https://api.github.com/repos/{repo}/git/trees/{sha}?recursive=1"
 _RAW = "https://raw.githubusercontent.com/{repo}/{sha}/{path}"
 
@@ -57,21 +67,18 @@ def cache_dir() -> Path:
     return Path(base) / "soarm-doctor" / ASSET_SHA[:12]
 
 
-def ensure_assets(model: str, quiet: bool = False) -> Path:
-    """Path to the URDF for `model`, downloading the assets once if needed."""
+def ensure_assets(quiet: bool = False) -> Path:
+    """Path to the URDF, downloading the meshes once if needed."""
     import json
 
-    if model not in ASSET_SUBDIR:
-        raise ValueError(f"no 3D assets known for model {model!r}")
-
-    root = cache_dir() / model
-    urdf = root / URDF_NAME[model]
+    root = cache_dir() / ASSET_MODEL
+    urdf = root / URDF_NAME
     if urdf.exists():
         return urdf
 
-    prefix = ASSET_SUBDIR[model]
+    prefix = ASSET_SUBDIR
     if not quiet:
-        print(f"  fetching {model.upper()} 3D assets (one time, into {cache_dir()})...")
+        print(f"  fetching 3D assets (one time, into {cache_dir()})...")
 
     with urllib.request.urlopen(_TREE_API.format(repo=ASSET_REPO, sha=ASSET_SHA), timeout=30) as response:
         tree = json.load(response)["tree"]
@@ -96,13 +103,168 @@ def ensure_assets(model: str, quiet: bool = False) -> Path:
         shutil.rmtree(staging, ignore_errors=True)
 
     if not urdf.exists():
-        raise RuntimeError(f"expected {URDF_NAME[model]} in the downloaded assets")
+        raise RuntimeError(f"expected {URDF_NAME} in the downloaded assets")
     return urdf
+
+
+# --- browser window ---------------------------------------------------------
+#: The viewer opens *beside* the terminal, not over it. Stage 3 is a dialogue —
+#: press ENTER, sweep every joint, Ctrl-C when done — so a maximised window that
+#: buries the terminal hides the one thing the operator still has to drive.
+#:
+#: Logical pixels, which the browser scales by the display factor: 1280x900 is
+#: half of a 2560x1440 desktop and still comfortably fits the 3D view next to
+#: its side panel.
+WINDOW_SIZE = (1280, 900)
+
+#: Chromium-family browsers, which are the ones that honour ``--window-size``.
+#: Firefox dropped its ``-width``/``-height`` flags, so a Firefox-only machine
+#: falls through to the plain open below and lands wherever the window manager
+#: decides — no worse than before, just not smaller.
+CHROMIUM_BINARIES = (
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "brave-browser",
+    "microsoft-edge",
+)
+
+
+def viewer_binary() -> str | None:
+    """The Rerun desktop viewer that ships inside the SDK wheel.
+
+    Preferred over ``PATH``, which in a virtualenv finds a console-script shim
+    and outside one may find a different Rerun entirely — the viewer has to be
+    the build matching the SDK doing the logging.
+    """
+    try:
+        import rerun_cli
+
+        binary = Path(rerun_cli.__file__).parent / ("rerun.exe" if os.name == "nt" else "rerun")
+        if binary.exists():
+            return str(binary)
+    except ImportError:
+        pass
+    return shutil.which("rerun")
+
+
+def launch_viewer(port: int, size: tuple[int, int] | None = WINDOW_SIZE):
+    """Start the desktop viewer on `port`, sized. ``None`` if it isn't there.
+
+    Launched by hand rather than through ``rr.spawn`` because spawn has no way
+    to pass ``--window-size``: it goes straight to Rust, so the viewer always
+    opens at its own default, which on a large display covers the terminal that
+    stages 2 and 3 are driven from.
+
+    Detached into its own session, so Ctrl-C during the motion sweep reaches
+    this process without also killing the window the operator is watching.
+    """
+    import subprocess
+
+    binary = viewer_binary()
+    if binary is None:
+        return None
+
+    argv = [binary, "--port", str(port), "--hide-welcome-screen"]
+    if size:
+        argv += ["--window-size", f"{size[0]}x{size[1]}"]
+    try:
+        return subprocess.Popen(
+            argv,
+            # What rr.spawn sets: tells the viewer it's an app, so it skips the
+            # analytics opt-in prompt on someone's first run.
+            env=dict(os.environ, RERUN_APP_ONLY="true"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+
+
+def viewer_ready(port: int, timeout: float = 15.0) -> bool:
+    """Wait for the viewer to accept connections on `port`.
+
+    Logging into a socket nobody is listening on yet loses the arm and the
+    first servos — the very part of the run worth watching.
+    """
+    import socket
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                return True
+        time.sleep(0.1)
+    return False
+
+
+def browser_profile_dir() -> Path:
+    """Throwaway browser profile for the viewer window.
+
+    Sized windows are only reliable in a profile of our own: a ``--window-size``
+    passed to an *already running* browser is forwarded to that process, which
+    is free to ignore it and usually does. This also keeps a diagnostic viewer
+    out of the operator's real browsing session, and gives the browser somewhere
+    to remember the size and position they drag the window to.
+    """
+    base = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
+    return Path(base) / "soarm-doctor" / "browser"
+
+
+def open_window(url: str, size: tuple[int, int] | None = WINDOW_SIZE):
+    """Open `url` in a window of roughly `size`.
+
+    Returns the browser process when we launched one *of our own*, so it can be
+    closed again later, and ``None`` when the page was handed to the operator's
+    default browser — that window is theirs, and closing it isn't ours to do.
+
+    `size` of ``None`` means don't try: straight to the default browser, which
+    is what someone asking for a full-size window wants.
+
+    Falls back to that same default browser — full size, whatever it happens to
+    be — rather than failing: a viewer in the wrong shape beats no viewer.
+    """
+    import subprocess
+
+    for name in CHROMIUM_BINARIES if size else ():
+        binary = shutil.which(name)
+        if binary is None:
+            continue
+        try:
+            return subprocess.Popen(
+                [
+                    binary,
+                    # App mode: no tab strip or address bar, so the window is
+                    # all viewer. The URL is on the terminal if it's wanted.
+                    f"--app={url}",
+                    f"--window-size={size[0]},{size[1]}",
+                    f"--user-data-dir={browser_profile_dir()}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            continue  # present but not runnable; try the next one
+
+    webbrowser.open(url)
+    return None
 
 
 # --- colours ----------------------------------------------------------------
 # RGBA. The body is ghosted so the solid servos read as the only signal.
-COLOUR_BODY = (120, 125, 135, 40)
+#
+# `albedo_factor` replaces the URDF's own material rather than tinting the mesh,
+# so this is the literal colour drawn — the SO-ARM body renders in the URDF's
+# printed-PLA yellow (255, 234, 97) without it. Alpha is kept modest because
+# overlapping body meshes stack, and several translucent layers add up to
+# something close to opaque.
+COLOUR_BODY = (55, 62, 78, 55)
 COLOUR_UNCHECKED = (150, 150, 155, 255)
 COLOUR_CHECKING = (90, 160, 245, 255)
 COLOUR_OK = (60, 190, 110, 255)
@@ -122,11 +284,124 @@ STATUS_COLOURS = {
 TICKS_PER_TURN = 4096
 TICK_CENTRE = 2048  # STS3215 mid-scale
 
+# --- camera -----------------------------------------------------------------
+# Where the eye starts, in the URDF's frame: metres, Z up, arm mounted at the
+# origin with its reach along -X. Side-on with the gripper to the left, yawed
+# just off-axis — a true side view lines the servos up behind one another, and
+# the small yaw is what separates all six. Rerun's default eye frames the whole
+# scene from the front, where the wrist servos hide behind the elbow.
+#
+# The user can still orbit freely; this only decides where they start.
+EYE_POSITION = (0.44, 0.08, 0.19)
+EYE_TARGET = (-0.06, -0.06, 0.09)
+EYE_UP = (0.0, 0.0, 1.0)
+
+#: Entity holding the run's outcome as markdown.
+VERDICT_PATH = "verdict"
+
 #: Ticks of travel before the observed range is trusted for scaling. Below this
 #: the range is still growing every frame and mapping through it would make the
 #: on-screen joint jump around; ~400 ticks is about 35 degrees, well past an
 #: accidental nudge.
 SWEEP_FOR_RANGE_MAPPING = 400
+
+
+#: Says which arm is on screen. An SO-101 owner is looking at an SO-100, and a
+#: diagnostic that quietly shows the wrong hardware invites the question of what
+#: else it is approximating. Stated, it's simply a stand-in; silent, it's a bug.
+VIEW_NOTE = "*SO-100 shown — the SO-101 has the same six servos, joints and bus.*"
+
+#: What the panel says before there's a verdict.
+#:
+#: The point of this view is that you watch it instead of the terminal — so it
+#: has to answer "what is happening, and what do I do now?" at every moment, not
+#: sit on one word until the end. Rerun's viewer can't host a button (it is a
+#: one-way data sink: no widget archetype, no callback into the SDK), so when an
+#: action is needed the panel has to say plainly where to go and do it.
+#:
+#: Each stage therefore leads with where it is in the run, and any action the
+#: operator has to take is a heading of its own — a side panel gets skimmed, not
+#: read, and a request buried in a sentence is a request that gets missed.
+STAGE_STARTING = """# 1 of 3 · Finding the arm
+
+Looking for the USB serial port.
+
+*Nothing to do yet.*"""
+
+STAGE_READY = """# 2 of 3 · Servos + power
+
+The arm is on screen, every servo **grey** — none checked yet.
+
+## → Press ENTER in the terminal
+
+Each servo then lights **blue** as it's tested,
+and turns **green** or **red**."""
+
+STAGE_SERVOS = """# 2 of 3 · Checking servos…
+
+- **blue** — testing right now
+- **green** — responding, powered, stable
+- **red** — fault
+
+*Nothing to do — this takes a few seconds.*"""
+
+STAGE_MOTION = """# 3 of 3 · Sweep the arm
+
+## → Move every joint by hand
+
+Take each one through its full range,
+and open and close the gripper.
+
+Watch **encoder position** below: every trace
+should follow your hand. A flat line is a joint
+that isn't reading.
+
+## → Ctrl-C in the terminal when done"""
+
+#: Stage 2's result and the cue into stage 3, shown together — the operator is
+#: being asked to act on what just happened, so both belong on screen at once.
+PROMPT_MOTION = """# 3 of 3 · Motion sweep
+
+## → Press ENTER in the terminal
+
+Then move every joint and the gripper by hand."""
+
+
+def fault_word(servo: ServoResult) -> str:
+    """Why this servo isn't ok, in the terminal's own words."""
+    if not servo.responded:
+        return "no response"
+    if servo.errors:
+        return "/".join(servo.errors)
+    return f"flaky {servo.pings_ok}/{servo.pings_total}"
+
+
+def servo_summary_markdown(servos: list[ServoResult]) -> str:
+    """Stage 2's outcome, then what to do next.
+
+    Deliberately ranked by :func:`ping_status`, the same function that colours
+    the servos — a panel disagreeing with the arm on screen is worse than no
+    panel at all.
+    """
+    faults = [servo for servo in servos if ping_status(servo) != "ok"]
+    if not faults:
+        headline = [f"# ✓ Servos OK  ({len(servos)}/{len(servos)})", "", "All responding, powered and stable."]
+    else:
+        headline = [
+            f"# ✗ {len(faults)} of {len(servos)} servos faulty",
+            "",
+            *(f"- **{servo.name}** — {fault_word(servo)}" for servo in faults),
+        ]
+    return "\n".join([*headline, "", "---", "", PROMPT_MOTION])
+
+
+def verdict_markdown(verdict: Verdict) -> str:
+    """The terminal's verdict block, as markdown for the view's side panel."""
+    heading = "✓ PASS" if verdict.passed else f"✗ FAIL — {verdict.code}"
+    lines = [f"# {heading}", "", verdict.summary]
+    if verdict.remedies:
+        lines += ["", *(f"- {remedy}" for remedy in verdict.remedies)]
+    return "\n".join(lines)
 
 
 def ping_status(servo: ServoResult) -> str:
@@ -205,24 +480,31 @@ class RerunViz:
 
     def __init__(
         self,
-        model: str,
         spawn: bool = False,
         save: str | None = None,
         web_port: int = 9090,
         grpc_port: int = 9876,
         open_browser: bool = True,
+        window_size: tuple[int, int] = WINDOW_SIZE,
     ) -> None:
-        self.model = model
         self.spawn = spawn
         self.save = save
         self.web_port = web_port
         self.grpc_port = grpc_port
         self.open_browser = open_browser
+        self.window_size = window_size
+        self.sized_window = False
+        self._browser = None
+        #: The desktop viewer, when we launched it. Deliberately never closed:
+        #: it's a separate app that outlives the run, which is what lets the
+        #: operator keep studying the result after the terminal is done.
+        self._viewer = None
         self._tree = None
         self._joints: dict[str, object] = {}
         self._servo_paths: dict[str, list[str]] = {}
         self._last_status: dict[str, str] = {}
         self._frame = 0
+        self.moved_ports = False
         self.url: str | None = None
 
     # -- setup --
@@ -233,27 +515,95 @@ class RerunViz:
         except ImportError as exc:  # pragma: no cover - depends on the extra
             raise VizUnavailable("3D view needs the viz extra — pip install 'soarm-doctor[viz]'") from exc
 
-        urdf_path = ensure_assets(self.model)
+        urdf_path = ensure_assets()
         blueprint = self._blueprint(rrb)
 
         rr.init("soarm-doctor", default_blueprint=blueprint)
         if self.save:
-            rr.save(self.save)
+            rr.save(self.save, default_blueprint=blueprint)
         elif self.spawn:
-            rr.spawn(default_blueprint=blueprint)
+            # Must be a free port, and this is not a nicety. `spawn` treats
+            # anything already listening as a viewer and streams to it instead
+            # of opening a window — so a stopped or half-dead process holding
+            # the port swallows the whole run: no window, no error, nothing.
+            self._pick_ports(web=False)
+            self._viewer = launch_viewer(self.grpc_port, self.window_size)
+            if self._viewer is None:
+                # No viewer binary to drive ourselves; let the SDK try its way.
+                rr.spawn(port=self.grpc_port, default_blueprint=blueprint)
+            else:
+                self.sized_window = self.window_size is not None
+                viewer_ready(self.grpc_port)
+                rr.connect_grpc(f"rerun+http://127.0.0.1:{self.grpc_port}/proxy", default_blueprint=blueprint)
         else:
+            self._pick_ports()
             uri = rr.serve_grpc(grpc_port=self.grpc_port, default_blueprint=blueprint)
-            # Opening the tab here matters: the checks take seconds, and a user
-            # who has to copy a link misses the whole sequence.
-            rr.serve_web_viewer(web_port=self.web_port, open_browser=self.open_browser, connect_to=uri)
+            # Rerun's own `open_browser` maximises a tab over the terminal, and
+            # the terminal is still where stages 2 and 3 are driven from. Serve
+            # without opening, then open the window ourselves.
+            rr.serve_web_viewer(web_port=self.web_port, open_browser=False, connect_to=uri)
             self.url = f"http://localhost:{self.web_port}/?url={uri}"
+            # Opening it here matters: the checks take seconds, and a user who
+            # has to copy a link misses the whole sequence.
+            if self.open_browser:
+                self._browser = open_window(self.url, self.window_size)
+                self.sized_window = self._browser is not None
 
         self._tree = rr.urdf.UrdfTree.from_file_path(str(urdf_path))
         self._tree.log_urdf_to_recording()
+        self._hide_collision()
         self._resolve(servos)
         self._ghost_body()
         for servo in servos:
             self._paint(servo.name, "unchecked")
+        self._write_verdict(STAGE_STARTING)
+
+    @staticmethod
+    def _port_free(port: int) -> bool:
+        import socket
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind(("0.0.0.0", port))
+                return True
+            except OSError:
+                return False
+
+    def _pick_ports(self, attempts: int = 20, web: bool = True) -> None:
+        """Step past ports a previous viewer is still holding.
+
+        Leaving a viewer open is the normal way to use this — you re-run the
+        check and want the old one to compare against. Refusing to start because
+        of that would be hostile, so take the next free pair and say so.
+
+        `web` is False for the desktop viewer, which needs only the gRPC port.
+        """
+        for offset in range(attempts):
+            candidate_web, grpc = self.web_port + offset, self.grpc_port + offset
+            if self._port_free(grpc) and (not web or self._port_free(candidate_web)):
+                self.moved_ports = offset > 0
+                self.grpc_port = grpc
+                if web:
+                    self.web_port = candidate_web
+                return
+        busy = (
+            f"{self.web_port}-{self.web_port + attempts}" if web else f"{self.grpc_port}-{self.grpc_port + attempts}"
+        )
+        raise VizUnavailable(f"ports {busy} are all in use — close an old viewer or pass --viz-port")
+
+    def _hide_collision(self) -> None:
+        """Drop the collision meshes the URDF loader logs alongside the visuals.
+
+        These are crude opaque hulls that sit exactly on top of the visual mesh,
+        so they hide the ghosted body and, on the SO-ARM, most of the servos too
+        — the arm looks like nothing was ever coloured. Nothing here is a
+        physics sim; the collision geometry has no reason to be on screen.
+        """
+        import rerun as rr
+
+        for link in self._all_links():
+            for path in self._tree.get_collision_geometry_paths(link):
+                rr.log(path, rr.Clear(recursive=True), static=True)
 
     def _resolve(self, servos: list[ServoResult]) -> None:
         """Find each servo's joint and its motor mesh.
@@ -282,26 +632,133 @@ class RerunViz:
                     rr.log(path, rr.Asset3D.from_fields(albedo_factor=list(COLOUR_BODY)), static=True)
 
     def _all_links(self) -> list[str]:
+        """Every link in the URDF, in tree order.
+
+        Taken from the URDF rather than from the resolved servos, so a run with
+        custom ``--names`` that matches no joint still gets a clean picture.
+        """
         links = []
-        for joint in self._joints.values():
+        for joint in self._tree.joints():
             for link in (joint.parent_link, joint.child_link):
                 name = getattr(link, "name", link)
                 if name not in links:
                     links.append(name)
         return links
 
+    @staticmethod
+    def _eye(rrb) -> dict:
+        """Starting camera, as kwargs for :class:`Spatial3DView`.
+
+        Empty on Rerun versions that don't have ``EyeControls3D``, or that have
+        changed it — the archetype is flagged unstable upstream and the viz
+        extra allows anything from 0.28 up. A default camera angle is a nicety;
+        it must never be the reason the 3D view fails to open.
+        """
+        controls = getattr(getattr(rrb, "archetypes", None), "EyeControls3D", None)
+        if controls is None:
+            return {}
+        try:
+            return {"eye_controls": controls(position=EYE_POSITION, look_target=EYE_TARGET, eye_up=EYE_UP)}
+        except TypeError:
+            return {}
+
     def _blueprint(self, rrb):
         return rrb.Blueprint(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="servos — grey unchecked · green ok · red fault"),
+                rrb.Spatial3DView(
+                    name="servos — grey unchecked · green ok · red fault",
+                    **self._eye(rrb),
+                ),
                 rrb.Vertical(
+                    rrb.TextDocumentView(origin=VERDICT_PATH, name="verdict"),
                     rrb.TimeSeriesView(origin="joint", name="encoder position"),
                     rrb.TimeSeriesView(origin="fault", name="corrupt reads"),
+                    row_shares=[1, 1, 1],
                 ),
                 column_shares=[2, 1],
             ),
             collapse_panels=True,
         )
+
+    # -- verdict --
+    # Named methods rather than a string argument: the CLI imports this module
+    # lazily, so it can't reach the constants above.
+    def stage_ready(self) -> None:
+        """Waiting on the ENTER that starts stage 2.
+
+        Its own stage because the panel otherwise still reads "finding the
+        port" while the run sits waiting for a keypress nobody knows to press.
+        """
+        self._write_verdict(STAGE_READY)
+
+    def stage_servos(self) -> None:
+        """Stage 2 is running — servos being pinged one at a time."""
+        self._write_verdict(STAGE_SERVOS)
+
+    def servos_checked(self, servos: list[ServoResult]) -> None:
+        """Stage 2 is done: show how it went, and cue stage 3."""
+        self._write_verdict(servo_summary_markdown(servos))
+        # Nothing else is logged until the operator presses ENTER, so without a
+        # flush the result of the check they just watched arrives late.
+        self._flush()
+
+    def stage_motion(self) -> None:
+        """Stage 3 has started — the operator's cue to start sweeping."""
+        self._write_verdict(STAGE_MOTION)
+
+    def _write_verdict(self, markdown: str) -> None:
+        import rerun as rr
+
+        body = f"{markdown}\n\n---\n{VIEW_NOTE}"
+        rr.log(VERDICT_PATH, rr.TextDocument(body, media_type=rr.MediaType.MARKDOWN), static=True)
+
+    def show_verdict(self, verdict: Verdict) -> None:
+        """Put the run's outcome on screen, and make sure it gets there.
+
+        The 3D view exists so you can watch rather than read, which means a run
+        that dies before the arm is even reached must say so *here* — otherwise
+        the servos simply stay grey and the view looks like it's still working.
+        """
+        self._write_verdict(verdict_markdown(verdict))
+        # The CLI exits within milliseconds of this call, taking the server with
+        # it. Without a blocking flush the last thing logged is the one thing
+        # the viewer never receives.
+        self._flush()
+
+    def close(self) -> None:
+        """Shut the viewer window we opened.
+
+        Exiting kills the *server*, not the window: the browser is a separate
+        process that outlives us and would sit there showing a page whose feed
+        has gone dead. So "press ENTER to close it" has to actually close it.
+
+        Only ever the window we launched ourselves — a page handed to the
+        operator's own browser lives in their session alongside their own tabs,
+        and killing that is not ours to do.
+        """
+        if self._browser is None:
+            return
+        try:
+            self._browser.terminate()
+            self._browser.wait(timeout=5)
+        except Exception:
+            # Already gone (they closed it themselves), or refusing to die.
+            # Either way the operator is done and we're on our way out.
+            pass
+        finally:
+            self._browser = None
+
+    @staticmethod
+    def _flush(timeout_sec: float = 2.0) -> None:
+        """Push everything logged so far to the viewer. Never fatal."""
+        try:
+            from rerun.recording_stream import get_data_recording
+
+            stream = get_data_recording()
+            if stream is not None:
+                stream.flush(timeout_sec=timeout_sec)
+        except Exception:
+            pass
 
     # -- painting --
     def _paint(self, servo_name: str, status: str) -> None:
@@ -346,6 +803,3 @@ class RerunViz:
             status = servo_status(servo)
             if status != "untested":
                 self._paint(servo.name, status)
-
-    def close(self) -> None:
-        pass
