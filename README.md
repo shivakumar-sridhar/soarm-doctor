@@ -70,22 +70,7 @@ $ soarm
 
 ## Install
 
-Straight from this repo — one line, and you get the `soarm` command:
-
-```bash
-pip install "soarm-doctor[viz] @ git+https://github.com/shivakumar-sridhar/soarm-doctor"
-```
-
-`[viz]` pulls in the live 3D view. Drop it for the terminal check alone:
-
-```bash
-pip install "soarm-doctor @ git+https://github.com/shivakumar-sridhar/soarm-doctor"
-```
-
-Python 3.10+. Linux, macOS and Windows. Needs `git` on your PATH.
-
-<details>
-<summary>Into a virtualenv (recommended)</summary>
+Copy all three lines. This is the one to use.
 
 ```bash
 python3 -m venv .venv
@@ -93,11 +78,22 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install "soarm-doctor[viz] @ git+https://github.com/shivakumar-sridhar/soarm-doctor"
 ```
 
-Activate the venv in every new terminal before running `soarm`.
-</details>
+You now have the `soarm` command, with the live 3D view included.
 
-<details>
-<summary>To hack on it</summary>
+> **Activate the venv in every new terminal** — `source .venv/bin/activate` —
+> or `soarm` won't be found.
+
+Python 3.10+, and `git` on your PATH. Linux, macOS and Windows.
+
+### Without the 3D view
+
+Same thing minus `[viz]`. The terminal check is identical either way.
+
+```bash
+pip install "soarm-doctor @ git+https://github.com/shivakumar-sridhar/soarm-doctor"
+```
+
+### To hack on it
 
 ```bash
 git clone https://github.com/shivakumar-sridhar/soarm-doctor
@@ -107,10 +103,11 @@ source .venv/bin/activate
 pip install -e '.[viz,dev]'
 pytest
 ```
-</details>
 
-To upgrade later, add `--force-reinstall` to the same command — pip sees the
-same version number and otherwise skips the install.
+### Upgrading
+
+Re-run the install with `--force-reinstall`. The version number doesn't change
+between pushes, so pip otherwise decides you already have it and does nothing.
 
 ---
 
